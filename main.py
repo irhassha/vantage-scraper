@@ -93,23 +93,23 @@ async def scrape_vessel_data():
                 # VesselFinder tidak menampilkan sisa jarak (Distance) secara publik
                 # Untuk sementara kita set 0. Nanti ML bisa menghitung dari kordinat jika diperlukan.
                 scraped_distance = 0.0 
-                
-                print(f"Ekstraksi Berhasil -> Speed: {scraped_speed} kn | ETA: {scraped_eta}")
 
-                # 4. Insert ke Supabase tracking_logs
-                log_data = {
-                    "schedule_id": vessel_id,
-                    "speed_sog": scraped_speed,
-                    "distance_to_jkt": scraped_distance,
-                    "preview_eta_ais": scraped_eta
-                }
+                # 4. Ekstrak Destination menggunakan Regex
+                dest_match = re.search(r'en route to the port of ([^,]+)', markdown_text, re.IGNORECASE)
+                if not dest_match:
+                    dest_match = re.search(r'Destination\s*[:|]\s*([^\n\r]+)', markdown_text, re.IGNORECASE)
                 
-                # 3. Insert ke Supabase tracking_logs
+                scraped_destination = dest_match.group(1).replace('*', '').strip() if dest_match else 'Unknown'
+                
+                print(f"Ekstraksi Berhasil -> Speed: {scraped_speed} kn | ETA: {scraped_eta} | Destination: {scraped_destination}")
+
+                # 5. Insert ke Supabase tracking_logs
                 log_data = {
                     "schedule_id": vessel_id,
                     "speed_sog": scraped_speed,
                     "distance_to_jkt": scraped_distance,
-                    "preview_eta_ais": scraped_eta
+                    "preview_eta_ais": scraped_eta,
+                    "destination": scraped_destination
                 }
                 
                 supabase.table('tracking_logs').insert(log_data).execute()
