@@ -16,8 +16,16 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 # Load Environment Variables
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    raise ValueError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in environment variables")
+
+try:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+except Exception as e:
+    print(f"Gagal inisialisasi Supabase Client. Periksa koneksi atau kredensial: {e}")
+    sys.exit(1)
 
 # --- KONSTANTA KOORDINAT TUJUAN (Jakarta / NPCT1) ---
 JAKARTA_LAT = -6.09

@@ -2,8 +2,8 @@ name: VANTAGE Vessel Scraper
 
 on:
   schedule:
-    # Berjalan setiap jam pada menit ke-15 (untuk menghindari lonjakan trafik bot di menit ke-00)
-    - cron: '15 * * * *'
+    # Berjalan otomatis setiap 4 jam (00:00, 04:00, 08:00, dst. UTC)
+    - cron: '0 */4 * * *'
   workflow_dispatch: # Memungkinkan kamu trigger manual dari tombol di GitHub
 
 jobs:
@@ -24,11 +24,11 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        # Install Playwright browsers (dibutuhkan oleh Crawl4ai)
-        python -m playwright install chromium
+        # Install Playwright browsers beserta dependensi sistem (dibutuhkan oleh Crawl4ai)
+        python -m playwright install --with-deps chromium
 
     - name: Run Scraper
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       run: python main.py
