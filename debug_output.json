@@ -1,0 +1,20 @@
+[
+  {
+    "id": "a02cee63-cc47-469b-90da-e816ac738734",
+    "vessel_id": "1b9bce8e-2119-4278-a09c-0d6019069b93",
+    "actual_atb": null,
+    "master_vessels": {
+      "imo_number": "9213105",
+      "vessel_name": "MERATUS JIMBARAN"
+    }
+  },
+  {
+    "id": "3ccaa461-4a3e-458b-9091-2e0f5e9160f9",
+    "vessel_id": "25955537-abfb-41d9-b7a4-8ce745428d01",
+    "actual_atb": null,
+    "master_vessels": {
+      "imo_number": "9374595",
+      "vessel_name": "MSC ARIA III"
+    }
+  }
+]
