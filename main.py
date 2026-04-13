@@ -1,7 +1,8 @@
 import os
 import sys
 import asyncio
-import re # Tambahkan ini untuk Regex
+import re       # Tambahkan ini untuk Regex
+import json     # Tambahkan ini untuk parsing JSON djson
 import math # Untuk kalkulasi Haversine
 from datetime import datetime, timedelta # Tambahkan ini untuk format waktu
 
@@ -61,54 +62,78 @@ def haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 def extract_coordinates(html_text: str, markdown_text: str):
     """
-    Ekstrak koordinat Latitude/Longitude dari HTML source VesselFinder.
-    VesselFinder menyimpan koordinat di beberapa tempat:
-    1. JavaScript variable: var defined in inline scripts
-    2. Meta tag / JSON-LD data
-    3. URL parameter pada link peta
-    
-    Returns:
-        Tuple (lat, lon) atau (None, None) jika gagal
+    Ekstrak koordinat Latitude/Longitude kapal sesuai prioritas spesifik VesselFinder.
+    1. Parsing <div id="djson" data-json="..."> (paling presisi)
+    2. Fallback: Meta Description
+    3. Fallback: JSON-LD
+    4. Fallback: Global Regex
     """
-    lat, lon = None, None
-    
-    # Strategi 1: Cari dari JavaScript variable di HTML
-    # Pola umum: "latitude":13.12345,"longitude":100.12345
-    coord_match = re.search(r'["\']latitude["\']\s*:\s*(-?[\d.]+).*?["\']longitude["\']\s*:\s*(-?[\d.]+)', html_text, re.IGNORECASE | re.DOTALL)
-    if coord_match:
-        lat = float(coord_match.group(1))
-        lon = float(coord_match.group(2))
-        return lat, lon
-    
-    # Strategi 2: Cari pola lat/lon di JavaScript variable assignments
-    # Contoh: var lat = 13.12345; var lng = 100.12345;
-    lat_match = re.search(r'(?:var|let|const)?\s*(?:lat|latitude)\s*[=:]\s*(-?[\d.]+)', html_text, re.IGNORECASE)
-    lon_match = re.search(r'(?:var|let|const)?\s*(?:lng|lon|longitude)\s*[=:]\s*(-?[\d.]+)', html_text, re.IGNORECASE)
-    if lat_match and lon_match:
-        lat = float(lat_match.group(1))
-        lon = float(lon_match.group(1))
-        return lat, lon
-    
-    # Strategi 3: Cari Center Map coordinates di URL atau inline script
-    # Pola: center=[lat],[lon] atau setView([lat, lon])
-    center_match = re.search(r'(?:center|setView)\s*(?:\(|=)\s*\[?\s*(-?[\d.]+)\s*[,/]\s*(-?[\d.]+)', html_text, re.IGNORECASE)
-    if center_match:
-        lat = float(center_match.group(1))
-        lon = float(center_match.group(2))
-        return lat, lon
-    
-    # Strategi 4: Cari koordinat dari teks markdown
-    # Pola: "13° 7.43' N / 100° 53.37' E" (DMS format)
-    dms_match = re.search(r'(\d+)°\s*([\d.]+)\'?\s*([NS])\s*/\s*(\d+)°\s*([\d.]+)\'?\s*([EW])', markdown_text)
-    if dms_match:
-        lat_deg = float(dms_match.group(1)) + float(dms_match.group(2)) / 60
-        if dms_match.group(3) == 'S':
-            lat_deg = -lat_deg
-        lon_deg = float(dms_match.group(4)) + float(dms_match.group(5)) / 60
-        if dms_match.group(6) == 'W':
-            lon_deg = -lon_deg
-        return round(lat_deg, 6), round(lon_deg, 6)
-    
+    def clean_coord(val):
+        if val is None:
+            return None
+        cleaned = re.sub(r'[^\d\.-]', '', str(val))
+        if not cleaned or cleaned == '.' or cleaned == '-':
+            return None
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+
+    # STRATEGI UTAMA (Akurat): Extract dari djson elemen khusus VesselFinder
+    # Mencari <div id="djson" data-json='{...}'>
+    djson_match = re.search(r'<div[^>]*id=["\']djson["\'][^>]*data-json=([\'"])(.*?)\1', html_text, re.IGNORECASE | re.DOTALL)
+    if djson_match:
+        try:
+            # Decode elemen JSON yang sering di-escape string pada HTML attribute
+            raw_json = djson_match.group(2).replace('&quot;', '"')
+            parsed_data = json.loads(raw_json)
+            
+            lat = clean_coord(parsed_data.get('ship_lat'))
+            lon = clean_coord(parsed_data.get('ship_lon'))
+            
+            if lat is not None and lon is not None:
+                return lat, lon
+        except Exception as e:
+            print(f"[DEBUG] Gagal decode djson: {e}")
+
+    # Pola spesifik yang diminta user untuk keperluan fallback global 
+    global_regex = r'([-+]?\d{1,2}\.\d+)\s*/\s*([-+]?\d{1,4}\.\d+)'
+
+    # STRATEGI FALLBACK 1: Meta Description
+    meta_desc = re.search(r'<meta[^>]+(?:name|property)=["\'](?:description|og:description)["\'][^>]+content=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
+    if meta_desc:
+        match = re.search(global_regex, meta_desc.group(1))
+        if match:
+            lat = clean_coord(match.group(1))
+            lon = clean_coord(match.group(2))
+            if lat is not None and lon is not None:
+                return lat, lon
+
+    # STRATEGI FALLBACK 2: JSON-LD
+    json_ld_blocks = re.findall(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html_text, re.IGNORECASE | re.DOTALL)
+    for block in json_ld_blocks:
+        match = re.search(global_regex, block)
+        if match:
+            lat = clean_coord(match.group(1))
+            lon = clean_coord(match.group(2))
+            if lat is not None and lon is not None:
+                return lat, lon
+
+    # STRATEGI FALLBACK 3: Global Scan di HTML dan Markdown
+    match = re.search(global_regex, html_text)
+    if match:
+        lat = clean_coord(match.group(1))
+        lon = clean_coord(match.group(2))
+        if lat is not None and lon is not None:
+            return lat, lon
+
+    match = re.search(global_regex, markdown_text)
+    if match:
+        lat = clean_coord(match.group(1))
+        lon = clean_coord(match.group(2))
+        if match and lat is not None and lon is not None:
+            return lat, lon
+
     return None, None
 
 def clean_markdown_link(text: str) -> str:
@@ -168,11 +193,6 @@ async def scrape_vessel_data():
                 # Untuk MVP, kita mock data ini. Nanti kita buat Regex/LLM extraction dari raw markdown-nya
                 print(f"Berhasil scrape data untuk {vessel_name}")
                 
-                # Simpan full teks ke file agar mudah dibaca di VS Code
-                with open(f"{vessel_name}_data.txt", "w", encoding="utf-8") as file:
-                    file.write(result.markdown)
-                print(f"Silakan cek file {vessel_name}_data.txt di sebelah kiri (Explorer)!")
-                
                 # MOCK DATA PASING (Ganti dengan logika parsing teks yang sebenarnya nanti)
                 # --- EKSTRAKSI DATA ASLI DARI MARKDOWN ---
                 markdown_text = result.markdown
@@ -227,7 +247,7 @@ async def scrape_vessel_data():
                     vessel_lat = None
                     vessel_lon = None
                     scraped_distance = 0.0
-                    print(f"⚠ Koordinat tidak valid atau ditemukan kosong, distance_to_jkt diset 0.0")
+                    print(f"⚠ Koordinat tidak ditemukan, distance_to_jkt diset 0.0")
 
                 # 4. Ekstrak Destination menggunakan Regex
                 dest_match = re.search(r'en route to\s*\*\*([^*]+)\*\*', markdown_text, re.IGNORECASE)
@@ -285,9 +305,9 @@ async def scrape_vessel_data():
                 if scraped_previous_port:
                     schedule_update['previous_port'] = scraped_previous_port
                 
-                # 9. Update current_speed jika speed > 0 (kapal sedang bergerak)
-                if scraped_speed > 0:
-                    schedule_update['current_speed'] = scraped_speed
+                # 9. Update speed_sog secara konsisten ke vessel_schedules
+                if scraped_speed is not None:
+                    schedule_update['speed_sog'] = scraped_speed
                 
                 # 10. Update distance_to_jkt_nm jika koordinat berhasil diekstrak
                 if scraped_distance > 0:
