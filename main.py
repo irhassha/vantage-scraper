@@ -206,12 +206,28 @@ async def scrape_vessel_data():
                     markdown_text
                 )
                 
-                if vessel_lat is not None and vessel_lon is not None:
+                # Data Validation untuk latitude dan longitude
+                def is_valid_coord(val):
+                    if val is None or val == "":
+                        return False
+                    try:
+                        f = float(val)
+                        return not math.isnan(f)
+                    except (ValueError, TypeError):
+                        return False
+                
+                is_valid_location = is_valid_coord(vessel_lat) and is_valid_coord(vessel_lon)
+                
+                if is_valid_location:
+                    vessel_lat = float(vessel_lat)
+                    vessel_lon = float(vessel_lon)
                     scraped_distance = haversine_nm(vessel_lat, vessel_lon, JAKARTA_LAT, JAKARTA_LON)
                     print(f"📍 Koordinat: ({vessel_lat}, {vessel_lon}) | Jarak ke Jakarta: {scraped_distance} NM")
                 else:
+                    vessel_lat = None
+                    vessel_lon = None
                     scraped_distance = 0.0
-                    print(f"⚠ Koordinat tidak ditemukan, distance_to_jkt diset 0.0")
+                    print(f"⚠ Koordinat tidak valid atau ditemukan kosong, distance_to_jkt diset 0.0")
 
                 # 4. Ekstrak Destination menggunakan Regex
                 dest_match = re.search(r'en route to\s*\*\*([^*]+)\*\*', markdown_text, re.IGNORECASE)
@@ -251,11 +267,19 @@ async def scrape_vessel_data():
                     "destination": scraped_destination
                 }
                 
+                if is_valid_location:
+                    log_data["latitude"] = vessel_lat
+                    log_data["longitude"] = vessel_lon
+                
                 supabase.table('tracking_logs').insert(log_data).execute()
                 print(f"Data log {vessel_name} tersimpan di Supabase.")
                 
                 # --- UPDATE VESSEL_SCHEDULES ---
                 schedule_update = {}
+                
+                if is_valid_location:
+                    schedule_update['latitude'] = vessel_lat
+                    schedule_update['longitude'] = vessel_lon
                 
                 # 8. Update previous_port jika berhasil diekstrak
                 if scraped_previous_port:
