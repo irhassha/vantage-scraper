@@ -4,6 +4,7 @@ import asyncio
 import re       # Tambahkan ini untuk Regex
 import json     # Tambahkan ini untuk parsing JSON djson
 import math # Untuk kalkulasi Haversine
+import random # Untuk jitter
 from datetime import datetime, timedelta # Tambahkan ini untuk format waktu
 
 # Pastikan console Windows mendukung karakter Unicode (seperti tanda panah dari Crawl4AI)
@@ -165,7 +166,8 @@ async def scrape_vessel_data():
         headless=True,
         verbose=True,
         # Menambahkan argumen anti-bot standar
-        extra_args=["--disable-blink-features=AutomationControlled"]
+        extra_args=["--disable-blink-features=AutomationControlled"],
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
     )
     run_config = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
@@ -181,6 +183,10 @@ async def scrape_vessel_data():
             vessel_name = schedule['master_vessels']['vessel_name']
             liner_eta_raw = schedule.get('liner_eta')  # TIMESTAMPTZ string dari Supabase
             
+            if not imo or imo.upper().startswith("N/A"):
+                print(f"Skipping {vessel_name} karena IMO Number belum tersedia ({imo}).")
+                continue
+
             print(f"Tracking {vessel_name} (IMO: {imo})...")
             
             # Target URL (VesselFinder menggunakan IMO di URL-nya)
@@ -363,8 +369,8 @@ async def scrape_vessel_data():
                     except Exception as e:
                         print(f"⚠ Gagal update vessel_schedules: {e}")
                 
-                # Beri jeda antar kapal agar tidak di-ban
-                await asyncio.sleep(5)
+                # Beri jeda acak (jitter) antar kapal agar tidak di-ban
+                await asyncio.sleep(random.uniform(3, 7))
             else:
                 print(f"Gagal scrape {vessel_name}: {result.error_message}")
 
