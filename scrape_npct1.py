@@ -199,6 +199,21 @@ async def scrape_npct1():
         except Exception as e:
             print(f"  - Error update/insert jadwal: {e}")
             
+    # Cleanup: Tandai jadwal lama sebagai Departed
+    # Jika ETB sudah lewat dari 3 hari yang lalu, kita anggap kapal sudah selesai (Departed)
+    three_days_ago = (datetime.now() - timedelta(days=3)).isoformat() + "Z"
+    try:
+        cleanup_res = supabase.table('vessel_schedules') \
+            .update({'status': 'Departed', 'is_watchlist': False}) \
+            .lt('etb', three_days_ago) \
+            .neq('status', 'Departed') \
+            .execute()
+        
+        cleaned_count = len(cleanup_res.data) if cleanup_res.data else 0
+        print(f"\nCleanup: {cleaned_count} jadwal lama otomatis ditandai sebagai DEPARTED.")
+    except Exception as e:
+        print(f"\nError saat cleanup jadwal lama: {e}")
+        
     print(f"\nSelesai! Berhasil memproses/mengupdate {success_count} jadwal kapal dari NPCT1.")
 
 if __name__ == "__main__":
