@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from scrape_npct1 import scrape_npct1
+from scrape_imo import scrape_imo_resolution
 
 # Load Environment Variables
 load_dotenv()
@@ -146,13 +147,46 @@ def clean_markdown_link(text: str) -> str:
         return text
     return re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text).strip()
 
+def create_notification(schedule_id: str, vessel_name: str, voyage: str, notification_type: str, severity: str, title: str, message: str, metadata: dict = None):
+    """
+    Helper untuk memasukkan notifikasi baru ke tabel 'notifications' di Supabase.
+    Mencegah notifikasi duplikat jenis yang sama untuk kapal yang sama dalam 6 jam terakhir.
+    """
+    try:
+        six_hours_ago = (datetime.utcnow() - timedelta(hours=6)).isoformat()
+        recent = supabase.table('notifications') \
+            .select('id') \
+            .eq('schedule_id', schedule_id) \
+            .eq('notification_type', notification_type) \
+            .gt('created_at', six_hours_ago) \
+            .execute()
+            
+        if recent.data and len(recent.data) > 0:
+            print(f"  🔔 Skip notifikasi '{notification_type}' untuk {vessel_name} (sudah dinotifikasi dalam 6j terakhir).")
+            return
+            
+        notif_payload = {
+            'schedule_id': schedule_id,
+            'vessel_name': vessel_name,
+            'voyage': voyage or 'N/A',
+            'notification_type': notification_type,
+            'severity': severity,
+            'title': title,
+            'message': message,
+            'metadata': metadata or {}
+        }
+        supabase.table('notifications').insert(notif_payload).execute()
+        print(f"  🔔 NOTIFIKASI DIBUAT: [{title}] {message}")
+    except Exception as e:
+        print(f"  ⚠ Gagal membuat notifikasi: {e}")
+
 async def scrape_vessel_data():
     print("Mulai mengambil data kapal dari Supabase...")
     
     # 1. Ambil data jadwal kapal yang belum sandar (actual_atb is null)
     # Kita join dengan master_vessels untuk mendapatkan imo_number
     response = supabase.table('vessel_schedules') \
-        .select('id, liner_eta, master_vessels(imo_number, vessel_name)') \
+        .select('id, voyage, speed_sog, previous_port, liner_eta, master_vessels(imo_number, vessel_name)') \
         .is_('actual_atb', 'null') \
         .neq('status', 'Departed') \
         .execute()
@@ -177,12 +211,28 @@ async def scrape_vessel_data():
         word_count_threshold=10 
     )
 
-    async with AsyncWebCrawler(config=browser_config) as crawler:
         for schedule in schedules:
             vessel_id = schedule['id']
+            voyage = schedule.get('voyage', 'N/A')
+            old_speed = schedule.get('speed_sog')
+            old_previous_port = schedule.get('previous_port')
             imo = schedule['master_vessels']['imo_number']
             vessel_name = schedule['master_vessels']['vessel_name']
             liner_eta_raw = schedule.get('liner_eta')  # TIMESTAMPTZ string dari Supabase
+            
+            # Ambil tracking_log terakhir untuk perbandingan ETA AIS
+            old_eta_ais = None
+            try:
+                last_log_res = supabase.table('tracking_logs') \
+                    .select('preview_eta_ais') \
+                    .eq('schedule_id', vessel_id) \
+                    .order('scraped_at', desc=True) \
+                    .limit(1) \
+                    .execute()
+                if last_log_res.data and len(last_log_res.data) > 0:
+                    old_eta_ais = last_log_res.data[0].get('preview_eta_ais')
+            except Exception as e:
+                print(f"  ⚠ Gagal mengambil log terakhir: {e}")
             
             if not imo or imo.upper().startswith("N/A"):
                 print(f"Skipping {vessel_name} karena IMO Number belum tersedia ({imo}).")
@@ -284,6 +334,84 @@ async def scrape_vessel_data():
                 scraped_nav_status = nav_status_match.group(1).strip() if nav_status_match else None
                 
                 print(f"Ekstraksi Berhasil -> Speed: {scraped_speed} kn | ETA: {scraped_eta} | Dest: {scraped_destination} | Last Port: {scraped_previous_port} | Nav: {scraped_nav_status}")
+
+                # --- ELEMEN EVALUASI NOTIFIKASI BERTH PLANNER ---
+                jakarta_keywords = ['jakarta', 'idjkt', 'tanjung priok', 'jkt', 'id jkt']
+                is_destination_jakarta = any(
+                    kw in scraped_destination.lower() for kw in jakarta_keywords
+                ) if scraped_destination else False
+
+                # 1. Notifikasi: Perubahan Speed Signifikan (selisih >= 3.0 knot)
+                if old_speed is not None and scraped_speed is not None:
+                    try:
+                        old_speed_f = float(old_speed)
+                        if old_speed_f > 0:
+                            speed_diff = round(scraped_speed - old_speed_f, 2)
+                            if abs(speed_diff) >= 3.0:
+                                if speed_diff < 0:
+                                    severity = 'warning' if scraped_speed < 5.0 else 'info'
+                                    title = f"⚠️ Penurunan Kecepatan: {vessel_name}"
+                                    msg = f"{vessel_name} (Voyage: {voyage}) melambat dari {old_speed_f} kn ke {scraped_speed} kn. Estimasi tiba di berth berpotensi terpengaruh."
+                                else:
+                                    severity = 'info'
+                                    title = f"⚡ Peningkatan Kecepatan: {vessel_name}"
+                                    msg = f"{vessel_name} (Voyage: {voyage}) mempercepat laju dari {old_speed_f} kn ke {scraped_speed} kn."
+                                    
+                                create_notification(
+                                    schedule_id=vessel_id,
+                                    vessel_name=vessel_name,
+                                    voyage=voyage,
+                                    notification_type='SPEED_CHANGE',
+                                    severity=severity,
+                                    title=title,
+                                    message=msg,
+                                    metadata={'speed_old': old_speed_f, 'speed_new': scraped_speed, 'diff': speed_diff}
+                                )
+                    except Exception as e:
+                        print(f"  ⚠ Error evaluasi notif speed: {e}")
+
+                # 2. Notifikasi: Perubahan ETA AIS (> 2 jam)
+                if old_eta_ais and scraped_eta and old_eta_ais != scraped_eta:
+                    try:
+                        old_eta_dt = datetime.fromisoformat(old_eta_ais.replace('Z', '+00:00'))
+                        new_eta_dt = datetime.fromisoformat(scraped_eta.replace('Z', '+00:00'))
+                        shift_hours = round((new_eta_dt.replace(tzinfo=None) - old_eta_dt.replace(tzinfo=None)).total_seconds() / 3600, 1)
+                        
+                        if abs(shift_hours) >= 2.0:
+                            severity = 'warning' if shift_hours > 0 else 'info'
+                            direction = f"mundur {shift_hours} jam" if shift_hours > 0 else f"maju {abs(shift_hours)} jam"
+                            title = f"📅 Perubahan ETA AIS: {vessel_name}"
+                            msg = f"ETA AIS {vessel_name} (Voyage: {voyage}) bergeser {direction}. ETA baru: {scraped_eta}."
+                            
+                            create_notification(
+                                schedule_id=vessel_id,
+                                vessel_name=vessel_name,
+                                voyage=voyage,
+                                notification_type='ETA_CHANGE',
+                                severity=severity,
+                                title=title,
+                                message=msg,
+                                metadata={'eta_old': old_eta_ais, 'eta_new': scraped_eta, 'shift_hours': shift_hours}
+                            )
+                    except Exception as e:
+                        print(f"  ⚠ Error evaluasi notif ETA: {e}")
+
+                # 3. Notifikasi: Departed Last Port / En route to Jakarta
+                if scraped_previous_port and old_previous_port and scraped_previous_port.lower() != old_previous_port.lower():
+                    if is_destination_jakarta:
+                        title = f"⛵ Departed Last Port: {vessel_name}"
+                        msg = f"{vessel_name} (Voyage: {voyage}) telah bertolak dari {scraped_previous_port} menuju Jakarta."
+                        
+                        create_notification(
+                            schedule_id=vessel_id,
+                            vessel_name=vessel_name,
+                            voyage=voyage,
+                            notification_type='DEPARTED_LAST_PORT',
+                            severity='info',
+                            title=title,
+                            message=msg,
+                            metadata={'previous_port': scraped_previous_port, 'destination': scraped_destination}
+                        )
 
                 # 7. Insert ke Supabase tracking_logs
                 log_data = {
@@ -467,11 +595,16 @@ async def archive_and_cleanup():
     print("[MAINTENANCE] Proses archive dan cleanup selesai.\n")
 
 async def main():
-    # Jalankan scraping jadwal NPCT1 dulu (update ETB, detect SAILED → Departed)
+    # 1. Jalankan scraping jadwal NPCT1 (update ETB, detect SAILED → Departed)
     await scrape_npct1()
-    # Lalu jalankan tracking posisi kapal via VesselFinder
+    
+    # 2. Cari IMO untuk kapal baru yang belum memiliki nomor IMO (maks 2 kapal per run)
+    await scrape_imo_resolution(max_vessels=2)
+    
+    # 3. Jalankan tracking posisi kapal via VesselFinder + Evaluasi Notifikasi
     await scrape_vessel_data()
-    # Lalu jalankan opsi cleanup & archiving database
+    
+    # 4. Jalankan opsi cleanup & archiving database
     await archive_and_cleanup()
 
 if __name__ == "__main__":

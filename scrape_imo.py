@@ -26,11 +26,11 @@ except Exception as e:
     print(f"Gagal inisialisasi Supabase Client: {e}")
     sys.exit(1)
 
-async def scrape_imo_resolution():
-    print("Memeriksa kapal dengan IMO 'N/A' di Supabase...")
+async def scrape_imo_resolution(max_vessels: int = 2):
+    print(f"Memeriksa hingga {max_vessels} kapal dengan IMO 'N/A' di Supabase...")
     
-    # 1. Ambil kapal yang IMO-nya 'N/A%'
-    res = supabase.table('master_vessels').select('id, vessel_name').ilike('imo_number', 'N/A%').execute()
+    # 1. Ambil kapal yang IMO-nya 'N/A%' (dibatasi max_vessels agar tidak overload)
+    res = supabase.table('master_vessels').select('id, vessel_name').ilike('imo_number', 'N/A%').limit(max_vessels).execute()
     vessels = res.data
     
     if not vessels:
