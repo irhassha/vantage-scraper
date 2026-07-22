@@ -253,6 +253,7 @@ async def scrape_vessel_data():
         word_count_threshold=10 
     )
 
+    async with AsyncWebCrawler(config=browser_config) as crawler:
         for schedule in schedules:
             vessel_id = schedule['id']
             voyage = schedule.get('voyage', 'N/A')
