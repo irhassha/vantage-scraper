@@ -147,6 +147,48 @@ def clean_markdown_link(text: str) -> str:
         return text
     return re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text).strip()
 
+def calculate_smart_predicted_eta(distance_nm: float, speed_kn: float, nav_status: str, scraped_eta_ais: str, liner_eta_raw: str = None) -> str:
+    """
+    Menghitung ETA Prediksi yang cerdas & aman dari anomali pembagian angka mendekati 0.
+    1. Jika kapal < 35 NM dari Jakarta & speed pelan/anchored -> Gunakan ETA AIS / liner_eta
+    2. Jika speed pelan tapi masih jauh -> Gunakan ETA AIS / kecepatan jelajah standar (13 kn)
+    3. Jika kalkulasi > 7 hari ke depan -> Fallback ke ETA AIS / liner_eta
+    """
+    now = datetime.utcnow()
+    nav_upper = nav_status.upper() if nav_status else ""
+    is_anchored_or_maneuvering = (
+        any(st in nav_upper for st in ['MANEUVERING', 'ANCHOR', 'MOORED', 'RESTRICTED', 'STOPPED']) 
+        or speed_kn < 1.5
+    )
+    
+    # 1. Dekat Jakarta (< 35 NM) dan sedang pelan / lego jangkar
+    if distance_nm > 0 and distance_nm < 35.0 and is_anchored_or_maneuvering:
+        if scraped_eta_ais:
+            return scraped_eta_ais
+        if liner_eta_raw:
+            return liner_eta_raw
+        return (now + timedelta(hours=2)).isoformat()
+        
+    # 2. Kecepatan sangat pelan / mati mesin tapi jarak masih jauh
+    effective_speed = speed_kn
+    if speed_kn < 1.5:
+        if scraped_eta_ais:
+            return scraped_eta_ais
+        effective_speed = 13.0  # Rata-rata kecepatan jelajah kapal kontainer (knot)
+        
+    # 3. Hitung estimasi waktu jika ada jarak & speed valid
+    if distance_nm > 0 and effective_speed > 0:
+        hours_needed = distance_nm / effective_speed
+        predicted_dt = now + timedelta(hours=hours_needed)
+        
+        # Guard limit: Jika hasil estimasi > 7 hari ke depan (mencegah outlier ribuan jam)
+        if (predicted_dt - now).days > 7:
+            return scraped_eta_ais or liner_eta_raw or (now + timedelta(days=7)).isoformat()
+            
+        return predicted_dt.isoformat()
+        
+    return scraped_eta_ais or liner_eta_raw
+
 def create_notification(schedule_id: str, vessel_name: str, voyage: str, notification_type: str, severity: str, title: str, message: str, metadata: dict = None):
     """
     Helper untuk memasukkan notifikasi baru ke tabel 'notifications' di Supabase.
@@ -335,6 +377,16 @@ async def scrape_vessel_data():
                 
                 print(f"Ekstraksi Berhasil -> Speed: {scraped_speed} kn | ETA: {scraped_eta} | Dest: {scraped_destination} | Last Port: {scraped_previous_port} | Nav: {scraped_nav_status}")
 
+                # Hitung Smart Predicted ETA untuk menghilangkan anomali division by zero/near-zero
+                smart_predicted_eta = calculate_smart_predicted_eta(
+                    distance_nm=scraped_distance,
+                    speed_kn=scraped_speed,
+                    nav_status=scraped_nav_status,
+                    scraped_eta_ais=scraped_eta,
+                    liner_eta_raw=liner_eta_raw
+                )
+                print(f"  🎯 Smart Predicted ETA: {smart_predicted_eta}")
+
                 # --- ELEMEN EVALUASI NOTIFIKASI BERTH PLANNER ---
                 jakarta_keywords = ['jakarta', 'idjkt', 'tanjung priok', 'jkt', 'id jkt']
                 is_destination_jakarta = any(
@@ -419,6 +471,7 @@ async def scrape_vessel_data():
                     "speed_sog": scraped_speed,
                     "distance_to_jkt": scraped_distance,
                     "preview_eta_ais": scraped_eta,
+                    "predicted_eta": smart_predicted_eta,
                     "destination": scraped_destination
                 }
                 
@@ -426,11 +479,19 @@ async def scrape_vessel_data():
                     log_data["latitude"] = vessel_lat
                     log_data["longitude"] = vessel_lon
                 
-                supabase.table('tracking_logs').insert(log_data).execute()
-                print(f"Data log {vessel_name} tersimpan di Supabase.")
+                try:
+                    supabase.table('tracking_logs').insert(log_data).execute()
+                    print(f"Data log {vessel_name} tersimpan di Supabase.")
+                except Exception as e:
+                    # Fallback jika kolom predicted_eta belum ada di tabel tracking_logs
+                    log_data.pop("predicted_eta", None)
+                    supabase.table('tracking_logs').insert(log_data).execute()
+                    print(f"Data log {vessel_name} tersimpan di Supabase (tanpa predicted_eta column).")
                 
                 # --- UPDATE VESSEL_SCHEDULES ---
-                schedule_update = {}
+                schedule_update = {
+                    "predicted_eta": smart_predicted_eta
+                }
                 
                 if is_valid_location:
                     schedule_update['latitude'] = vessel_lat
@@ -496,7 +557,14 @@ async def scrape_vessel_data():
                         supabase.table('vessel_schedules').update(schedule_update).eq('id', vessel_id).execute()
                         print(f"✅ vessel_schedules updated: {list(schedule_update.keys())}")
                     except Exception as e:
-                        print(f"⚠ Gagal update vessel_schedules: {e}")
+                        # Fallback jika kolom predicted_eta belum ada di vessel_schedules
+                        schedule_update.pop("predicted_eta", None)
+                        if schedule_update:
+                            try:
+                                supabase.table('vessel_schedules').update(schedule_update).eq('id', vessel_id).execute()
+                                print(f"✅ vessel_schedules updated (fallback): {list(schedule_update.keys())}")
+                            except Exception as ex:
+                                print(f"⚠ Gagal update vessel_schedules: {ex}")
                 
                 # Beri jeda acak (jitter) antar kapal agar tidak di-ban
                 await asyncio.sleep(random.uniform(3, 7))
