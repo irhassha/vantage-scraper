@@ -14,6 +14,7 @@ if sys.platform == 'win32':
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+from scrape_npct1 import scrape_npct1
 
 # Load Environment Variables
 load_dotenv()
@@ -466,7 +467,9 @@ async def archive_and_cleanup():
     print("[MAINTENANCE] Proses archive dan cleanup selesai.\n")
 
 async def main():
-    # Jalankan scraping dulu
+    # Jalankan scraping jadwal NPCT1 dulu (update ETB, detect SAILED → Departed)
+    await scrape_npct1()
+    # Lalu jalankan tracking posisi kapal via VesselFinder
     await scrape_vessel_data()
     # Lalu jalankan opsi cleanup & archiving database
     await archive_and_cleanup()

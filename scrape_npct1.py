@@ -74,7 +74,7 @@ async def scrape_npct1():
     
     for row in rows:
         cols = row.find_all('td')
-        if len(cols) < 10:
+        if len(cols) < 13:
             continue
             
         vessel_name = cols[0].text.strip()
@@ -85,29 +85,49 @@ async def scrape_npct1():
         status = cols[5].text.strip().upper()
         etb_raw = cols[6].text.strip()
         ata_raw = cols[7].text.strip()
+        etd_raw = cols[8].text.strip()
+        atd_raw = cols[9].text.strip()
         
         # Handle SAILED status — auto-mark as Departed
         if status == 'SAILED':
-            voyage = voy_in if voy_in else voy_out
-            if vessel_name and voyage:
-                try:
-                    # Cari kapal di master_vessels
-                    res_vessel = supabase.table('master_vessels').select('id').ilike('vessel_name', vessel_name).limit(1).execute()
-                    if res_vessel.data and len(res_vessel.data) > 0:
-                        v_id = res_vessel.data[0]['id']
-                        # Cari jadwal yang sudah ada dan belum Departed
-                        existing = supabase.table('vessel_schedules').select('id, status').eq('vessel_id', v_id).eq('voyage', voyage).execute()
-                        if existing.data and len(existing.data) > 0:
-                            sched = existing.data[0]
-                            if sched.get('status') != 'Departed':
-                                supabase.table('vessel_schedules').update({
-                                    'status': 'Departed',
-                                    'is_watchlist': False
-                                }).eq('id', sched['id']).execute()
-                                success_count += 1
-                                print(f"  ⛵ {vessel_name} (Voyage: {voyage}) → Otomatis ditandai DEPARTED (SAILED di schedule)")
-                except Exception as e:
-                    print(f"  - Error update SAILED→Departed untuk {vessel_name}: {e}")
+            if not vessel_name:
+                continue
+            try:
+                # Cari kapal di master_vessels
+                res_vessel = supabase.table('master_vessels').select('id').ilike('vessel_name', vessel_name).limit(1).execute()
+                if not res_vessel.data or len(res_vessel.data) == 0:
+                    print(f"  ⚠ SAILED: {vessel_name} tidak ditemukan di master_vessels, skip.")
+                    continue
+                    
+                v_id = res_vessel.data[0]['id']
+                
+                # Coba cari jadwal pakai voy_in dulu, kalau tidak ketemu coba voy_out
+                sched = None
+                matched_voyage = None
+                for try_voyage in [voy_in, voy_out]:
+                    if not try_voyage:
+                        continue
+                    existing = supabase.table('vessel_schedules').select('id, status').eq('vessel_id', v_id).eq('voyage', try_voyage).execute()
+                    if existing.data and len(existing.data) > 0:
+                        sched = existing.data[0]
+                        matched_voyage = try_voyage
+                        break
+                
+                if not sched:
+                    print(f"  ⚠ SAILED: {vessel_name} — jadwal tidak ditemukan (voy_in={voy_in}, voy_out={voy_out}), skip.")
+                    continue
+                    
+                if sched.get('status') != 'Departed':
+                    supabase.table('vessel_schedules').update({
+                        'status': 'Departed',
+                        'is_watchlist': False
+                    }).eq('id', sched['id']).execute()
+                    success_count += 1
+                    print(f"  ⛵ {vessel_name} (Voyage: {matched_voyage}) → Otomatis ditandai DEPARTED (SAILED di NPCT1, ATD: {atd_raw or 'N/A'})")
+                else:
+                    print(f"  ✓ {vessel_name} (Voyage: {matched_voyage}) — sudah Departed sebelumnya.")
+            except Exception as e:
+                print(f"  - Error update SAILED→Departed untuk {vessel_name}: {e}")
             continue
 
         # Filter Status — hanya proses ACTIVE dan REGISTER
@@ -199,20 +219,8 @@ async def scrape_npct1():
         except Exception as e:
             print(f"  - Error update/insert jadwal: {e}")
             
-    # Cleanup: Tandai jadwal lama sebagai Departed
-    # Jika ETB sudah lewat dari 3 hari yang lalu, kita anggap kapal sudah selesai (Departed)
-    three_days_ago = (datetime.now() - timedelta(days=3)).isoformat() + "Z"
-    try:
-        cleanup_res = supabase.table('vessel_schedules') \
-            .update({'status': 'Departed', 'is_watchlist': False}) \
-            .lt('etb', three_days_ago) \
-            .neq('status', 'Departed') \
-            .execute()
-        
-        cleaned_count = len(cleanup_res.data) if cleanup_res.data else 0
-        print(f"\nCleanup: {cleaned_count} jadwal lama otomatis ditandai sebagai DEPARTED.")
-    except Exception as e:
-        print(f"\nError saat cleanup jadwal lama: {e}")
+    # Catatan: Cleanup Departed hanya dilakukan berdasarkan status SAILED dari NPCT1 (di atas).
+    # Tidak ada lagi cleanup otomatis berdasarkan ETB, agar tidak salah mark kapal yang belum benar-benar sailed.
         
     print(f"\nSelesai! Berhasil memproses/mengupdate {success_count} jadwal kapal dari NPCT1.")
 
