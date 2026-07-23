@@ -664,9 +664,6 @@ async def archive_and_cleanup():
     print("[MAINTENANCE] Proses archive dan cleanup selesai.\n")
 
 async def main():
-    # 1. Jalankan scraping jadwal NPCT1 (update ETB, detect SAILED → Departed)
-    await scrape_npct1()
-    
     # 2. Cari IMO untuk kapal baru yang belum memiliki nomor IMO (maks 2 kapal per run)
     await scrape_imo_resolution(max_vessels=2)
     
