@@ -403,12 +403,12 @@ async def scrape_vessel_data():
                             if abs(speed_diff) >= 3.0:
                                 if speed_diff < 0:
                                     severity = 'warning' if scraped_speed < 5.0 else 'info'
-                                    title = f"⚠️ Penurunan Kecepatan: {vessel_name}"
-                                    msg = f"{vessel_name} (Voyage: {voyage}) melambat dari {old_speed_f} kn ke {scraped_speed} kn. Estimasi tiba di berth berpotensi terpengaruh."
+                                    title = f"⚠️ Speed Decrease: {vessel_name}"
+                                    msg = f"{vessel_name} (Voyage: {voyage}) slowed down from {old_speed_f} kn to {scraped_speed} kn. Berth ETA might be affected."
                                 else:
                                     severity = 'info'
-                                    title = f"⚡ Peningkatan Kecepatan: {vessel_name}"
-                                    msg = f"{vessel_name} (Voyage: {voyage}) mempercepat laju dari {old_speed_f} kn ke {scraped_speed} kn."
+                                    title = f"⚡ Speed Increase: {vessel_name}"
+                                    msg = f"{vessel_name} (Voyage: {voyage}) accelerated from {old_speed_f} kn to {scraped_speed} kn."
                                     
                                 create_notification(
                                     schedule_id=vessel_id,
@@ -432,9 +432,9 @@ async def scrape_vessel_data():
                         
                         if abs(shift_hours) >= 2.0:
                             severity = 'warning' if shift_hours > 0 else 'info'
-                            direction = f"mundur {shift_hours} jam" if shift_hours > 0 else f"maju {abs(shift_hours)} jam"
-                            title = f"📅 Perubahan ETA AIS: {vessel_name}"
-                            msg = f"ETA AIS {vessel_name} (Voyage: {voyage}) bergeser {direction}. ETA baru: {scraped_eta}."
+                            direction = f"delayed by {shift_hours} hours" if shift_hours > 0 else f"advanced by {abs(shift_hours)} hours"
+                            title = f"📅 AIS ETA Change: {vessel_name}"
+                            msg = f"AIS ETA for {vessel_name} (Voyage: {voyage}) shifted {direction}. New ETA: {scraped_eta}."
                             
                             create_notification(
                                 schedule_id=vessel_id,
@@ -453,7 +453,7 @@ async def scrape_vessel_data():
                 if scraped_previous_port and old_previous_port and scraped_previous_port.lower() != old_previous_port.lower():
                     if is_destination_jakarta:
                         title = f"⛵ Departed Last Port: {vessel_name}"
-                        msg = f"{vessel_name} (Voyage: {voyage}) telah bertolak dari {scraped_previous_port} menuju Jakarta."
+                        msg = f"{vessel_name} (Voyage: {voyage}) has departed from {scraped_previous_port} en route to Jakarta."
                         
                         create_notification(
                             schedule_id=vessel_id,
