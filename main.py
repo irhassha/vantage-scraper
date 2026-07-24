@@ -664,8 +664,8 @@ async def archive_and_cleanup():
     print("[MAINTENANCE] Proses archive dan cleanup selesai.\n")
 
 async def main():
-    # 2. Cari IMO untuk kapal baru yang belum memiliki nomor IMO (maks 2 kapal per run)
-    await scrape_imo_resolution(max_vessels=2)
+    # 2. Cari IMO untuk kapal baru yang belum memiliki nomor IMO (maks 5 kapal per run)
+    await scrape_imo_resolution(max_vessels=5)
     
     # 3. Jalankan tracking posisi kapal via VesselFinder + Evaluasi Notifikasi
     await scrape_vessel_data()

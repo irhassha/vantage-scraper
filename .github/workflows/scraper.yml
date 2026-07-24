@@ -2,8 +2,8 @@ name: VANTAGE Vessel Scraper
 
 on:
   schedule:
-    # Berjalan otomatis setiap 4 jam (00:00, 04:00, 08:00, dst. UTC)
-    - cron: '0 */4 * * *'
+    # Berjalan otomatis setiap 2 jam (00:00, 02:00, 04:00, dst. UTC)
+    - cron: '0 */2 * * *'
   workflow_dispatch: # Memungkinkan kamu trigger manual dari tombol di GitHub
 
 jobs:
