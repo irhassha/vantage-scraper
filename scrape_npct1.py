@@ -67,8 +67,8 @@ async def scrape_npct1():
     rows = tbody.find_all('tr')
     print(f"Ditemukan {len(rows)} baris data.")
     
-    # Hitung batas waktu: max 8 hari kedepan
-    eight_days_from_now = datetime.now() + timedelta(days=8)
+    # Hitung batas waktu: max 10 hari kedepan
+    ten_days_from_now = datetime.now() + timedelta(days=10)
     
     success_count = 0
     
@@ -134,12 +134,12 @@ async def scrape_npct1():
         if status not in ['ACTIVE', 'REGISTER']:
             continue
             
-        # Filter ETB Max 8 days
+        # Filter ETB Max 10 days
         if etb_raw:
             try:
                 etb_dt = datetime.strptime(etb_raw, "%Y-%m-%d %H:%M:%S")
-                if etb_dt > eight_days_from_now:
-                    # Skip jika lebih dari 8 hari
+                if etb_dt > ten_days_from_now:
+                    # Skip jika lebih dari 10 hari
                     continue
             except ValueError:
                 pass
