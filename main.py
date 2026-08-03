@@ -147,46 +147,62 @@ def clean_markdown_link(text: str) -> str:
         return text
     return re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text).strip()
 
-def calculate_smart_predicted_eta(distance_nm: float, speed_kn: float, nav_status: str, scraped_eta_ais: str, liner_eta_raw: str = None) -> str:
+def calculate_smart_predicted_eta(distance_nm: float, speed_kn: float, nav_status: str, scraped_eta_ais: str, liner_eta_raw: str = None, destination: str = None) -> str:
     """
-    Menghitung ETA Prediksi yang cerdas & aman dari anomali pembagian angka mendekati 0.
-    1. Jika kapal < 35 NM dari Jakarta & speed pelan/anchored -> Gunakan ETA AIS / liner_eta
-    2. Jika speed pelan tapi masih jauh -> Gunakan ETA AIS / kecepatan jelajah standar (13 kn)
-    3. Jika kalkulasi > 7 hari ke depan -> Fallback ke ETA AIS / liner_eta
+    Menghitung ETA Prediksi ke JAKARTA yang cerdas & aman dari anomali.
+    1. Jika destination BUKAN Jakarta: JANGAN PERNAH gunakan scraped_eta_ais (karena itu ETA ke port singgah).
+       Gunakan hitungan (jarak / speed jelajah + port stays) atau fallback ke liner_eta_raw.
+    2. Jika destination ADALAH Jakarta / dekat Jakarta (< 35 NM):
+       Gunakan scraped_eta_ais jika valid, atau hitung jarak / speed.
     """
     now = datetime.utcnow()
     nav_upper = nav_status.upper() if nav_status else ""
     is_anchored_or_maneuvering = (
-        any(st in nav_upper for st in ['MANEUVERING', 'ANCHOR', 'MOORED', 'RESTRICTED', 'STOPPED']) 
-        or speed_kn < 1.5
+        any(st in nav_upper for st in ['MANEUVERING', 'ANCHOR', 'MOORED', 'RESTRICTED', 'STOPPED', 'AT BERTH']) 
+        or (speed_kn is not None and speed_kn < 1.5)
     )
     
-    # 1. Dekat Jakarta (< 35 NM) dan sedang pelan / lego jangkar
-    if distance_nm > 0 and distance_nm < 35.0 and is_anchored_or_maneuvering:
-        if scraped_eta_ais:
-            return scraped_eta_ais
-        if liner_eta_raw:
-            return liner_eta_raw
-        return (now + timedelta(hours=2)).isoformat()
-        
-    # 2. Kecepatan sangat pelan / mati mesin tapi jarak masih jauh
-    effective_speed = speed_kn
-    if speed_kn < 1.5:
-        if scraped_eta_ais:
-            return scraped_eta_ais
-        effective_speed = 13.0  # Rata-rata kecepatan jelajah kapal kontainer (knot)
-        
-    # 3. Hitung estimasi waktu jika ada jarak & speed valid
-    if distance_nm > 0 and effective_speed > 0:
-        hours_needed = distance_nm / effective_speed
-        predicted_dt = now + timedelta(hours=hours_needed)
-        
-        # Guard limit: Jika hasil estimasi > 7 hari ke depan (mencegah outlier ribuan jam)
-        if (predicted_dt - now).days > 7:
-            return scraped_eta_ais or liner_eta_raw or (now + timedelta(days=7)).isoformat()
+    dest_str = (destination or "").lower()
+    is_destination_jkt = any(kw in dest_str for kw in ['jakarta', 'idjkt', 'tanjung priok', 'jkt', 'id jkt', 'priok'])
+    
+    # 1. Dekat Jakarta (< 35 NM)
+    if distance_nm is not None and 0 < distance_nm < 35.0:
+        if is_anchored_or_maneuvering:
+            if is_destination_jkt and scraped_eta_ais:
+                return scraped_eta_ais
+            if liner_eta_raw:
+                return liner_eta_raw
+            return (now + timedelta(hours=2)).isoformat()
+    
+    # 2. Jika tujuan BUKAN Jakarta: AIS ETA DILARANG KERAS
+    if not is_destination_jkt:
+        if distance_nm is not None and distance_nm > 0:
+            effective_speed = speed_kn if (speed_kn is not None and speed_kn > 1.5) else 13.0
+            # Tambahkan asumsi port stay (1-2 ports @ 24h)
+            assumed_ports = 2 if distance_nm > 2000 else 1
+            port_stay_hours = 24.0 * assumed_ports
+            if is_anchored_or_maneuvering:
+                port_stay_hours += 24.0  # port stay saat ini
             
-        return predicted_dt.isoformat()
+            travel_hours = (distance_nm / effective_speed) + port_stay_hours
+            predicted_dt = now + timedelta(hours=travel_hours)
+            if (predicted_dt - now).days <= 35:
+                return predicted_dt.isoformat()
         
+        # Fallback resmi liner untuk Jakarta
+        return liner_eta_raw
+        
+    # 3. Jika tujuan SUDAH Jakarta:
+    if distance_nm is not None and distance_nm > 0:
+        effective_speed = speed_kn if (speed_kn is not None and speed_kn > 1.5) else 13.0
+        travel_hours = distance_nm / effective_speed
+        predicted_dt = now + timedelta(hours=travel_hours)
+        if (predicted_dt - now).days <= 35:
+            # Jika ada AIS ETA valid, gunakan AIS ETA
+            if scraped_eta_ais:
+                return scraped_eta_ais
+            return predicted_dt.isoformat()
+            
     return scraped_eta_ais or liner_eta_raw
 
 def create_notification(schedule_id: str, vessel_name: str, voyage: str, notification_type: str, severity: str, title: str, message: str, metadata: dict = None):
@@ -384,7 +400,8 @@ async def scrape_vessel_data():
                     speed_kn=scraped_speed,
                     nav_status=scraped_nav_status,
                     scraped_eta_ais=scraped_eta,
-                    liner_eta_raw=liner_eta_raw
+                    liner_eta_raw=liner_eta_raw,
+                    destination=scraped_destination
                 )
                 print(f"  🎯 Smart Predicted ETA: {smart_predicted_eta}")
 
