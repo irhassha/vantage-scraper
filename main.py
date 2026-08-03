@@ -163,7 +163,7 @@ def calculate_smart_predicted_eta(distance_nm: float, speed_kn: float, nav_statu
     )
     
     dest_str = (destination or "").lower()
-    is_destination_jkt = any(kw in dest_str for kw in ['jakarta', 'idjkt', 'tanjung priok', 'jkt', 'id jkt', 'priok'])
+    is_destination_jkt = any(kw in dest_str for kw in ['jakarta', 'idjkt', 'iddkt', 'tanjung priok', 'jkt', 'id jkt', 'priok', 'idtpp'])
     
     # 1. Dekat Jakarta (< 35 NM)
     if distance_nm is not None and 0 < distance_nm < 35.0:
