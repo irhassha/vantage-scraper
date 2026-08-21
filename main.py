@@ -13,7 +13,8 @@ if sys.platform == 'win32':
 
 from dotenv import load_dotenv
 from supabase import create_client, Client
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+import httpx
+from bs4 import BeautifulSoup
 from scrape_npct1 import scrape_npct1
 from scrape_imo import scrape_imo_resolution
 
@@ -254,22 +255,14 @@ async def scrape_vessel_data():
         print("Tidak ada kapal yang sedang ditracking saat ini.")
         return
 
-    # 2. Setup Crawl4ai agar terlihat seperti browser manusia
-    browser_config = BrowserConfig(
-        headless=True,
-        verbose=True,
-        # Menambahkan argumen anti-bot standar
-        extra_args=["--disable-blink-features=AutomationControlled"],
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-    )
-    run_config = CrawlerRunConfig(
-        cache_mode=CacheMode.BYPASS,
-        # CSS Selector untuk mengambil elemen teks dari VesselFinder (contoh)
-        # Catatan: Selector ini mungkin perlu disesuaikan dengan struktur web aslinya
-        word_count_threshold=10 
-    )
+    # 2. Setup HTTP client ringan (tanpa browser headless)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    }
 
-    async with AsyncWebCrawler(config=browser_config) as crawler:
+    async with httpx.AsyncClient(headers=headers, verify=False, timeout=httpx.Timeout(30.0)) as client:
         for schedule in schedules:
             vessel_id = schedule['id']
             voyage = schedule.get('voyage', 'N/A')
@@ -302,45 +295,61 @@ async def scrape_vessel_data():
             # Target URL (VesselFinder menggunakan IMO di URL-nya)
             url = f"https://www.vesselfinder.com/vessels/details/{imo}"
             
-            result = await crawler.arun(url=url, config=run_config)
+            # Fetch data via HTTP (tanpa browser headless)
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+            except Exception as e:
+                print(f"Gagal scrape {vessel_name}: {e}")
+                await asyncio.sleep(random.uniform(3, 7))
+                continue
             
-            if result.success:
-                # Di sini kita akan memparsing result.markdown atau result.extracted_content
-                # Untuk MVP, kita mock data ini. Nanti kita buat Regex/LLM extraction dari raw markdown-nya
+            html_text = response.text
+            soup = BeautifulSoup(html_text, 'html.parser')
+            page_text = soup.get_text(separator='\n')
+            
+            if len(html_text) > 1000:  # Validasi halaman berhasil di-fetch
                 print(f"Berhasil scrape data untuk {vessel_name}")
                 
-                # MOCK DATA PASING (Ganti dengan logika parsing teks yang sebenarnya nanti)
-                # --- EKSTRAKSI DATA ASLI DARI MARKDOWN ---
-                markdown_text = result.markdown
+                # --- EKSTRAKSI DATA DARI HTML ---
                 
-                # 1. Ekstrak Speed menggunakan Regex
-                # Mencari pola: "Course / Speed  | 195.2° / 10.6 kn" dan mengambil angka 10.6
-                speed_match = re.search(r'Course / Speed\s*\|\s*[\d\.]+°\s*/\s*([\d\.]+)\s*kn', markdown_text)
-                scraped_speed = float(speed_match.group(1)) if speed_match else 0.0
+                # 1. Ekstrak Speed dari djson element (paling presisi)
+                scraped_speed = 0.0
+                djson_el = re.search(r'<div[^>]*id=["\']djson["\'][^>]*data-json=([\'"])(.*?)\1', html_text, re.IGNORECASE | re.DOTALL)
+                if djson_el:
+                    try:
+                        djson_raw = djson_el.group(2).replace('&quot;', '"')
+                        djson_data = json.loads(djson_raw)
+                        sog = djson_data.get('ship_sog')
+                        if sog is not None:
+                            scraped_speed = float(sog)
+                    except Exception:
+                        pass
+                if scraped_speed == 0.0:
+                    # Fallback: cari dari teks halaman
+                    speed_match = re.search(r'(\d+\.?\d*)\s*knots?', page_text)
+                    scraped_speed = float(speed_match.group(1)) if speed_match else 0.0
                 
-                # 2. Ekstrak ETA menggunakan Regex
-                # Mencari pola: "ETA: Apr 6, 17:30 (" dan mengambil "Apr 6, 17:30"
-                eta_match = re.search(r'ETA:\s*(.*?)\s*\(', markdown_text)
+                # 2. Ekstrak ETA menggunakan Regex dari teks halaman
+                eta_match = re.search(r'ETA:\s*([A-Z][a-z]{2}\s+\d{1,2},\s*\d{1,2}:\d{2})', page_text)
                 scraped_eta_raw = eta_match.group(1) if eta_match else None
                 
                 # 3. Format ETA agar diterima oleh Supabase (TIMESTAMPTZ)
                 scraped_eta = None
                 if scraped_eta_raw:
                     try:
-                        # Tambahkan tahun berjalan (2026) agar format waktunya lengkap
-                        eta_str = f"{scraped_eta_raw} 2026" 
+                        # Tambahkan tahun berjalan agar format waktunya lengkap
+                        current_year = datetime.utcnow().year
+                        eta_str = f"{scraped_eta_raw} {current_year}"
                         # Parse format "Apr 6, 17:30 2026"
                         parsed_date = datetime.strptime(eta_str, "%b %d, %H:%M %Y")
-                        scraped_eta = parsed_date.isoformat() # Hasil: "2026-04-06T17:30:00"
+                        scraped_eta = parsed_date.isoformat()
                     except Exception as e:
                         print(f"Gagal memformat tanggal ETA: {e}")
                 
                 # Kalkulasi jarak ke Jakarta menggunakan Haversine
-                # Ekstrak koordinat dari HTML source (bukan markdown)
-                vessel_lat, vessel_lon = extract_coordinates(
-                    result.html if hasattr(result, 'html') and result.html else '',
-                    markdown_text
-                )
+                # Ekstrak koordinat dari HTML source
+                vessel_lat, vessel_lon = extract_coordinates(html_text, page_text)
                 
                 # Data Validation untuk latitude dan longitude
                 def is_valid_coord(val):
@@ -365,31 +374,27 @@ async def scrape_vessel_data():
                     scraped_distance = 0.0
                     print(f"⚠ Koordinat tidak ditemukan, distance_to_jkt diset 0.0")
 
-                # 4. Ekstrak Destination menggunakan Regex
-                dest_match = re.search(r'en route to\s*\*\*([^*]+)\*\*', markdown_text, re.IGNORECASE)
+                # 4. Ekstrak Destination dari teks halaman
+                # VesselFinder format: "en route to the port of\nPortName" (terpisah baris)
+                dest_match = re.search(r'en route to the port of\s*\n\s*([^\n,]+)', page_text, re.IGNORECASE)
                 if not dest_match:
-                    dest_match = re.search(r'en route to the port of ([^,]+)', markdown_text, re.IGNORECASE)
+                    dest_match = re.search(r'en route to\s*\n\s*([^\n,]+)', page_text, re.IGNORECASE)
                 if not dest_match:
-                    dest_match = re.search(r'Destination\s*\n\s*([^\n\r]+)', markdown_text, re.IGNORECASE)
-                if not dest_match:
-                    dest_match = re.search(r'Destination\s*[:|]\s*([^\n\r]+)', markdown_text, re.IGNORECASE)
+                    dest_match = re.search(r'Destination\s*\n\s*([^\n]+)', page_text, re.IGNORECASE)
                 
-                scraped_destination = dest_match.group(1).replace('*', '').strip() if dest_match else 'Unknown'
+                scraped_destination = dest_match.group(1).strip() if dest_match else 'Unknown'
                 scraped_destination = clean_markdown_link(scraped_destination)
                 
-                # 5. Ekstrak Previous Port (Last Port) menggunakan Regex
-                # Format di markdown: "Last Port\n[Port Name, Country](url)"
-                last_port_match = re.search(r'Last Port\s*\n\s*\[([^\]]+)\]', markdown_text, re.IGNORECASE)
+                # 5. Ekstrak Previous Port (Last Port) dari teks halaman
+                last_port_match = re.search(r'Last Port\s*\n\s*([^\n]+)', page_text, re.IGNORECASE)
                 if not last_port_match:
-                    # Fallback: cari pola "Departure Port" atau "Last Port  |  Port Name"
-                    last_port_match = re.search(r'Last Port\s*[:|]\s*([^\n\r]+)', markdown_text, re.IGNORECASE)
+                    last_port_match = re.search(r'Last Port\s*[:|]\s*([^\n\r]+)', page_text, re.IGNORECASE)
                 scraped_previous_port = last_port_match.group(1).strip() if last_port_match else None
                 if scraped_previous_port:
                     scraped_previous_port = clean_markdown_link(scraped_previous_port)
                 
-                # 6. Ekstrak Navigation Status menggunakan Regex
-                # Format: "Navigation Status  |  Moored  |" atau "Navigation Status  |  Under way  |"
-                nav_status_match = re.search(r'Navigation Status\s*\|\s*([^|]+?)\s*\|', markdown_text, re.IGNORECASE)
+                # 6. Ekstrak Navigation Status dari teks halaman
+                nav_status_match = re.search(r'Navigation Status\s*\n\s*([^\n]+)', page_text, re.IGNORECASE)
                 scraped_nav_status = nav_status_match.group(1).strip() if nav_status_match else None
                 
                 print(f"Ekstraksi Berhasil -> Speed: {scraped_speed} kn | ETA: {scraped_eta} | Dest: {scraped_destination} | Last Port: {scraped_previous_port} | Nav: {scraped_nav_status}")
@@ -587,7 +592,7 @@ async def scrape_vessel_data():
                 # Beri jeda acak (jitter) antar kapal agar tidak di-ban
                 await asyncio.sleep(random.uniform(3, 7))
             else:
-                print(f"Gagal scrape {vessel_name}: {result.error_message}")
+                print(f"Gagal scrape {vessel_name}: Halaman terlalu kecil atau error ({len(html_text)} bytes)")
 
 async def archive_and_cleanup():
     print("\n[MAINTENANCE] Memulai proses archive dan cleanup tracking_logs...")
@@ -681,13 +686,28 @@ async def archive_and_cleanup():
     print("[MAINTENANCE] Proses archive dan cleanup selesai.\n")
 
 async def main():
+    # 1. Scrape jadwal kapal dari NPCT1
+    print("=" * 60)
+    print("TAHAP 1: Scraping Jadwal NPCT1")
+    print("=" * 60)
+    await scrape_npct1()
+    
     # 2. Cari IMO untuk kapal baru yang belum memiliki nomor IMO (maks 5 kapal per run)
+    print("\n" + "=" * 60)
+    print("TAHAP 2: Resolusi IMO Kapal Baru")
+    print("=" * 60)
     await scrape_imo_resolution(max_vessels=5)
     
     # 3. Jalankan tracking posisi kapal via VesselFinder + Evaluasi Notifikasi
+    print("\n" + "=" * 60)
+    print("TAHAP 3: Tracking Posisi Kapal (VesselFinder)")
+    print("=" * 60)
     await scrape_vessel_data()
     
     # 4. Jalankan opsi cleanup & archiving database
+    print("\n" + "=" * 60)
+    print("TAHAP 4: Archive & Cleanup Database")
+    print("=" * 60)
     await archive_and_cleanup()
 
 if __name__ == "__main__":

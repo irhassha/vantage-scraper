@@ -1,4 +1,4 @@
-crawl4ai
+httpx
+beautifulsoup4
 supabase
 python-dotenv
-asyncio

@@ -1,7 +1,7 @@
 import os
 import sys
 
-# Pastikan console Windows mendukung karakter Unicode (seperti tanda panah dari Crawl4AI)
+# Pastikan console Windows mendukung karakter Unicode
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
 
@@ -10,7 +10,7 @@ import re
 from urllib.parse import quote_plus
 from dotenv import load_dotenv
 from supabase import create_client, Client
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+import httpx
 
 # Load Environment Variables
 load_dotenv()
@@ -39,20 +39,16 @@ async def scrape_imo_resolution(max_vessels: int = 2):
         
     print(f"Ditemukan {len(vessels)} kapal yang membutuhkan IMO.")
     
-    # 2. Siapkan Crawler
-    browser_config = BrowserConfig(
-        headless=True,
-        verbose=True,
-        extra_args=["--disable-blink-features=AutomationControlled"]
-    )
-    run_config = CrawlerRunConfig(
-        cache_mode=CacheMode.BYPASS,
-        word_count_threshold=10 
-    )
+    # 2. Setup HTTP client ringan (tanpa browser headless)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    }
     
     success_count = 0
     
-    async with AsyncWebCrawler(config=browser_config) as crawler:
+    async with httpx.AsyncClient(headers=headers, verify=False, timeout=httpx.Timeout(30.0)) as client:
         for v in vessels:
             v_id = v['id']
             v_name = v['vessel_name']
@@ -64,19 +60,13 @@ async def scrape_imo_resolution(max_vessels: int = 2):
             search_url = f"https://www.vesselfinder.com/vessels?name={quote_plus(v_name)}"
             
             try:
-                result = await crawler.arun(
-                    url=search_url,
-                    config=run_config
-                )
-                
-                if not result.success:
-                    print(f"  - Gagal fetch halaman pencarian VesselFinder untuk {v_name}")
-                    continue
+                response = await client.get(search_url)
+                response.raise_for_status()
                     
-                # Ekstrak IMO dari Markdown content menggunakan Regex
+                # Ekstrak IMO dari HTML content menggunakan Regex
                 # Link di VesselFinder memiliki format /vessels/details/1234567
                 # Kita cari angka 7 digit pertama setelah /vessels/details/
-                match = re.search(r'/vessels/details/(\d{7})', result.markdown)
+                match = re.search(r'/vessels/details/(\d{7})', response.text)
                 
                 if match:
                     found_imo = match.group(1)
