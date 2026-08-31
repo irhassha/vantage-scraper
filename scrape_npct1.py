@@ -185,10 +185,13 @@ async def scrape_npct1():
         etb_utc = parse_wib_to_utc(etb_raw)
         ata_utc = parse_wib_to_utc(ata_raw)
         
-        # Mapping status NPCT1 ke status kita
+        # Mapping status NPCT1 ke status sistem kita:
+        # - Jika ada actual_atb (ATB) atau status 'ACTIVE' di terminal: 'Berth' (sudah sandar di dermaga)
+        # - Selain itu: 'En Route' (masih berlayar menuju pelabuhan)
         vessel_status = "En Route"
-        if status == 'ACTIVE' or ata_utc:
-            vessel_status = "Arrived"
+        is_berthed = (status == 'ACTIVE' or ata_utc is not None)
+        if is_berthed:
+            vessel_status = "Berth"
             
         schedule_data = {
             'vessel_id': vessel_id,
@@ -199,7 +202,9 @@ async def scrape_npct1():
             'is_watchlist': False
         }
         
-
+        if is_berthed:
+            schedule_data['speed_sog'] = 0.0
+            schedule_data['distance_to_jkt_nm'] = 0.0
         
         if ata_utc:
             schedule_data['actual_atb'] = ata_utc

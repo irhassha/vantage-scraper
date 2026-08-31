@@ -242,12 +242,13 @@ def create_notification(schedule_id: str, vessel_name: str, voyage: str, notific
 async def scrape_vessel_data():
     print("Mulai mengambil data kapal dari Supabase...")
     
-    # 1. Ambil data jadwal kapal yang belum sandar (actual_atb is null)
+    # 1. Ambil data jadwal kapal yang belum sandar (actual_atb is null dan bukan status Departed/Berth)
     # Kita join dengan master_vessels untuk mendapatkan imo_number
     response = supabase.table('vessel_schedules') \
         .select('id, voyage, speed_sog, previous_port, liner_eta, master_vessels(imo_number, vessel_name)') \
         .is_('actual_atb', 'null') \
         .neq('status', 'Departed') \
+        .neq('status', 'Berth') \
         .execute()
     
     schedules = response.data
