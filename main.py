@@ -17,6 +17,7 @@ import httpx
 from bs4 import BeautifulSoup
 from scrape_npct1 import scrape_npct1
 from scrape_imo import scrape_imo_resolution
+from scrape_shipmentlink import scrape_shipmentlink
 
 # Load Environment Variables
 load_dotenv()
@@ -698,6 +699,12 @@ async def main():
     print("TAHAP 2: Resolusi IMO Kapal Baru")
     print("=" * 60)
     await scrape_imo_resolution(max_vessels=5)
+    
+    # 2b. Ambil Route & ETA Liner dari ShipmentLink (JPI-A, JPI-B, CIT, CIM)
+    print("\n" + "=" * 60)
+    print("TAHAP 2b: Route & ETA Liner (ShipmentLink)")
+    print("=" * 60)
+    await scrape_shipmentlink()
     
     # 3. Jalankan tracking posisi kapal via VesselFinder + Evaluasi Notifikasi
     print("\n" + "=" * 60)
