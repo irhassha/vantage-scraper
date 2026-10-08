@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup
 from scrape_npct1 import scrape_npct1
 from scrape_imo import scrape_imo_resolution
 from scrape_shipmentlink import scrape_shipmentlink
+from scrape_maersk import scrape_maersk
 
 # Load Environment Variables
 load_dotenv()
@@ -705,6 +706,12 @@ async def main():
     print("TAHAP 2b: Route & ETA Liner (ShipmentLink)")
     print("=" * 60)
     await scrape_shipmentlink()
+    
+    # 2c. Ambil Route & ETA Liner dari Maersk (IN1, JKF, IA1, IA8, IA15, IA4)
+    print("\n" + "=" * 60)
+    print("TAHAP 2c: Route & ETA Liner (Maersk)")
+    print("=" * 60)
+    await scrape_maersk()
     
     # 3. Jalankan tracking posisi kapal via VesselFinder + Evaluasi Notifikasi
     print("\n" + "=" * 60)
