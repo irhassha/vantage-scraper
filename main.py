@@ -19,6 +19,7 @@ from scrape_npct1 import scrape_npct1
 from scrape_imo import scrape_imo_resolution
 from scrape_shipmentlink import scrape_shipmentlink
 from scrape_maersk import scrape_maersk
+from scrape_sitc import scrape_sitc
 
 # Load Environment Variables
 load_dotenv()
@@ -712,6 +713,12 @@ async def main():
     print("TAHAP 2c: Route & ETA Liner (Maersk)")
     print("=" * 60)
     await scrape_maersk()
+    
+    # 2d. Ambil Route & ETA Liner dari SITC (CMI, CMI2, JTH)
+    print("\n" + "=" * 60)
+    print("TAHAP 2d: Route & ETA Liner (SITC)")
+    print("=" * 60)
+    await scrape_sitc()
     
     # 3. Jalankan tracking posisi kapal via VesselFinder + Evaluasi Notifikasi
     print("\n" + "=" * 60)
