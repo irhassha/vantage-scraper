@@ -181,63 +181,43 @@ def clean_markdown_link(text: str) -> str:
         return text
     return re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text).strip()
 
-def calculate_smart_predicted_eta(distance_nm: float, speed_kn: float, nav_status: str, scraped_eta_ais: str, liner_eta_raw: str = None, destination: str = None) -> str:
+# Jadwal yang ETB-nya sudah lewat lebih dari ini tanpa ATB dianggap tidak aktif lagi
+STALE_SCHEDULE_DAYS = 3
+
+# Jarak maksimum dari Jakarta untuk mendeteksi ATA (anchorage Tanjung Priok + toleransi koordinat)
+ATA_MAX_DISTANCE_NM = 80
+
+def select_current_voyages(schedules: list, now_utc: datetime = None) -> list:
     """
-    Menghitung ETA Prediksi ke JAKARTA yang cerdas & aman dari anomali.
-    1. Jika destination BUKAN Jakarta: JANGAN PERNAH gunakan scraped_eta_ais (karena itu ETA ke port singgah).
-       Gunakan hitungan (jarak / speed jelajah + port stays) atau fallback ke liner_eta_raw.
-    2. Jika destination ADALAH Jakarta / dekat Jakarta (< 35 NM):
-       Gunakan scraped_eta_ais jika valid, atau hitung jarak / speed.
+    Pilih jadwal yang perlu di-scrape:
+    - Lewati jadwal lama yang tidak pernah ditutup (ETB/liner ETA lewat > STALE_SCHEDULE_DAYS hari).
+    - Satu kapal hanya untuk voyage terdekatnya: data AIS hanya menggambarkan voyage yang sedang
+      berjalan, jadi voyage berikutnya tidak boleh ikut menerima log dan notifikasi yang sama.
     """
-    now = datetime.utcnow()
-    nav_upper = nav_status.upper() if nav_status else ""
-    is_anchored_or_maneuvering = (
-        any(st in nav_upper for st in ['MANEUVERING', 'ANCHOR', 'MOORED', 'RESTRICTED', 'STOPPED', 'AT BERTH']) 
-        or (speed_kn is not None and speed_kn < 1.5)
-    )
-    
-    dest_str = (destination or "").lower()
-    is_destination_jkt = any(kw in dest_str for kw in ['jakarta', 'idjkt', 'iddkt', 'tanjung priok', 'jkt', 'id jkt', 'priok', 'idtpp'])
-    
-    # 1. Dekat Jakarta (< 35 NM)
-    if distance_nm is not None and 0 < distance_nm < 35.0:
-        if is_anchored_or_maneuvering:
-            if is_destination_jkt and scraped_eta_ais:
-                return scraped_eta_ais
-            if liner_eta_raw:
-                return liner_eta_raw
-            return (now + timedelta(hours=2)).isoformat()
-    
-    # 2. Jika tujuan BUKAN Jakarta: AIS ETA DILARANG KERAS
-    if not is_destination_jkt:
-        if distance_nm is not None and distance_nm > 0:
-            effective_speed = speed_kn if (speed_kn is not None and speed_kn > 1.5) else 13.0
-            # Tambahkan asumsi port stay (1-2 ports @ 24h)
-            assumed_ports = 2 if distance_nm > 2000 else 1
-            port_stay_hours = 24.0 * assumed_ports
-            if is_anchored_or_maneuvering:
-                port_stay_hours += 24.0  # port stay saat ini
-            
-            travel_hours = (distance_nm / effective_speed) + port_stay_hours
-            predicted_dt = now + timedelta(hours=travel_hours)
-            if (predicted_dt - now).days <= 35:
-                return predicted_dt.isoformat()
-        
-        # Fallback resmi liner untuk Jakarta
-        return liner_eta_raw
-        
-    # 3. Jika tujuan SUDAH Jakarta:
-    if distance_nm is not None and distance_nm > 0:
-        effective_speed = speed_kn if (speed_kn is not None and speed_kn > 1.5) else 13.0
-        travel_hours = distance_nm / effective_speed
-        predicted_dt = now + timedelta(hours=travel_hours)
-        if (predicted_dt - now).days <= 35:
-            # Jika ada AIS ETA valid, gunakan AIS ETA
-            if scraped_eta_ais:
-                return scraped_eta_ais
-            return predicted_dt.isoformat()
-            
-    return scraped_eta_ais or liner_eta_raw
+    now_utc = now_utc or datetime.now(timezone.utc)
+    cutoff = now_utc - timedelta(days=STALE_SCHEDULE_DAYS)
+    far_future = datetime.max.replace(tzinfo=timezone.utc)
+
+    def reference_time(schedule):
+        raw = schedule.get('etb') or schedule.get('liner_eta')
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+
+    current = {}
+    for schedule in schedules:
+        ref = reference_time(schedule)
+        if ref is not None and ref < cutoff:
+            continue
+        vessel = schedule.get('master_vessels') or {}
+        key = vessel.get('imo_number') or schedule['id']
+        best = current.get(key)
+        if best is None or (ref or far_future) < (reference_time(best) or far_future):
+            current[key] = schedule
+    return list(current.values())
 
 def create_notification(schedule_id: str, vessel_name: str, voyage: str, notification_type: str, severity: str, title: str, message: str, metadata: dict = None):
     """
@@ -278,13 +258,13 @@ async def scrape_vessel_data():
     # 1. Ambil data jadwal kapal yang belum sandar (actual_atb is null dan bukan status Departed/Berth)
     # Kita join dengan master_vessels untuk mendapatkan imo_number
     response = supabase.table('vessel_schedules') \
-        .select('id, voyage, speed_sog, previous_port, liner_eta, master_vessels(imo_number, vessel_name)') \
+        .select('id, voyage, speed_sog, previous_port, liner_eta, etb, ata, master_vessels(imo_number, vessel_name)') \
         .is_('actual_atb', 'null') \
         .neq('status', 'Departed') \
         .neq('status', 'Berth') \
         .execute()
     
-    schedules = response.data
+    schedules = select_current_voyages(response.data or [])
     if not schedules:
         print("Tidak ada kapal yang sedang ditracking saat ini.")
         return
@@ -304,7 +284,6 @@ async def scrape_vessel_data():
             old_previous_port = schedule.get('previous_port')
             imo = schedule['master_vessels']['imo_number']
             vessel_name = schedule['master_vessels']['vessel_name']
-            liner_eta_raw = schedule.get('liner_eta')  # TIMESTAMPTZ string dari Supabase
             
             # Ambil tracking_log terakhir untuk perbandingan ETA AIS
             old_eta_ais = None
@@ -436,17 +415,6 @@ async def scrape_vessel_data():
 
                 print(f"Ekstraksi Berhasil -> Speed: {scraped_speed} kn | ETA: {scraped_eta} | Dest: {scraped_destination} | Last Port: {scraped_previous_port} | Nav: {scraped_nav_status} | Position Received: {scraped_position_received_at}")
 
-                # Hitung Smart Predicted ETA untuk menghilangkan anomali division by zero/near-zero
-                smart_predicted_eta = calculate_smart_predicted_eta(
-                    distance_nm=scraped_distance,
-                    speed_kn=scraped_speed,
-                    nav_status=scraped_nav_status,
-                    scraped_eta_ais=scraped_eta,
-                    liner_eta_raw=liner_eta_raw,
-                    destination=scraped_destination
-                )
-                print(f"  🎯 Smart Predicted ETA: {smart_predicted_eta}")
-
                 # --- ELEMEN EVALUASI NOTIFIKASI BERTH PLANNER ---
                 jakarta_keywords = ['jakarta', 'idjkt', 'tanjung priok', 'jkt', 'id jkt']
                 is_destination_jakarta = any(
@@ -531,7 +499,6 @@ async def scrape_vessel_data():
                     "speed_sog": scraped_speed,
                     "distance_to_jkt": scraped_distance,
                     "preview_eta_ais": scraped_eta,
-                    "predicted_eta": smart_predicted_eta,
                     "destination": scraped_destination
                 }
                 
@@ -542,19 +509,11 @@ async def scrape_vessel_data():
                 if scraped_position_received_at:
                     log_data["position_received_at"] = scraped_position_received_at
 
-                try:
-                    supabase.table('tracking_logs').insert(log_data).execute()
-                    print(f"Data log {vessel_name} tersimpan di Supabase.")
-                except Exception as e:
-                    # Fallback jika kolom predicted_eta belum ada di tabel tracking_logs
-                    log_data.pop("predicted_eta", None)
-                    supabase.table('tracking_logs').insert(log_data).execute()
-                    print(f"Data log {vessel_name} tersimpan di Supabase (tanpa predicted_eta column).")
+                supabase.table('tracking_logs').insert(log_data).execute()
+                print(f"Data log {vessel_name} tersimpan di Supabase.")
                 
                 # --- UPDATE VESSEL_SCHEDULES ---
-                schedule_update = {
-                    "predicted_eta": smart_predicted_eta
-                }
+                schedule_update = {}
                 
                 if is_valid_location:
                     schedule_update['latitude'] = vessel_lat
@@ -583,51 +542,25 @@ async def scrape_vessel_data():
                     scraped_speed < 1.0 or 
                     (scraped_nav_status and scraped_nav_status.lower() in ['moored', 'at anchor', 'arrived'])
                 )
+                # Kapal yang berhenti jauh dari Jakarta (menunggu di port lain) belum tiba. Batas longgar
+                # karena koordinat VesselFinder dibulatkan ke derajat penuh (meleset hingga ~40 NM).
+                is_near_jakarta = is_valid_location and scraped_distance <= ATA_MAX_DISTANCE_NM
                 
-                if is_destination_jakarta and is_arrived:
+                # Hanya kedatangan pertama: tanpa cek ini ATA tertimpa setiap run selama kapal
+                # masih menunggu di anchorage, sampai bisa lebih lambat dari ATB.
+                if is_destination_jakarta and is_arrived and is_near_jakarta and not schedule.get('ata'):
                     ata_now = datetime.utcnow().isoformat()
                     schedule_update['ata'] = ata_now
                     schedule_update['status'] = 'Arrived'
                     print(f"⚓ ATA terdeteksi! {vessel_name} telah tiba di Jakarta pada {ata_now}")
-                    
-                    # 12. Kalkulasi Delay: selisih antara ATA dan liner_eta
-                    if liner_eta_raw:
-                        try:
-                            # Parse liner_eta dari Supabase (format ISO 8601 / TIMESTAMPTZ)
-                            # Coba beberapa format umum dari Supabase
-                            liner_eta_str = liner_eta_raw.replace('Z', '+00:00')
-                            if '+' in liner_eta_str or liner_eta_str.endswith('00:00'):
-                                liner_eta_dt = datetime.fromisoformat(liner_eta_str)
-                            else:
-                                liner_eta_dt = datetime.fromisoformat(liner_eta_str)
-                            
-                            ata_dt = datetime.fromisoformat(ata_now)
-                            delay_delta = ata_dt - liner_eta_dt.replace(tzinfo=None)
-                            delay_hours = round(delay_delta.total_seconds() / 3600, 2)
-                            
-                            schedule_update['ml_delay_hours'] = delay_hours
-                            
-                            if delay_hours > 0:
-                                print(f"📊 Delay terdeteksi: {delay_hours} jam terlambat dari liner ETA")
-                            else:
-                                print(f"📊 Kapal tiba {abs(delay_hours)} jam lebih awal dari liner ETA")
-                        except Exception as e:
-                            print(f"⚠ Gagal menghitung delay: {e}")
-                
+
                 # Lakukan update ke vessel_schedules jika ada data yang perlu di-update
                 if schedule_update:
                     try:
                         supabase.table('vessel_schedules').update(schedule_update).eq('id', vessel_id).execute()
                         print(f"✅ vessel_schedules updated: {list(schedule_update.keys())}")
                     except Exception as e:
-                        # Fallback jika kolom predicted_eta belum ada di vessel_schedules
-                        schedule_update.pop("predicted_eta", None)
-                        if schedule_update:
-                            try:
-                                supabase.table('vessel_schedules').update(schedule_update).eq('id', vessel_id).execute()
-                                print(f"✅ vessel_schedules updated (fallback): {list(schedule_update.keys())}")
-                            except Exception as ex:
-                                print(f"⚠ Gagal update vessel_schedules: {ex}")
+                        print(f"⚠ Gagal update vessel_schedules: {e}")
                 
                 # Beri jeda acak (jitter) antar kapal agar tidak di-ban
                 await asyncio.sleep(random.uniform(3, 7))
