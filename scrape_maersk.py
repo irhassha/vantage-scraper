@@ -31,7 +31,7 @@ MAERSK_CONSUMER_KEY = "uXe7bxTHLY0yY0e8jnS6kotShkLuAAqG"
 MAERSK_CARRIER_CODES = "MAEU,SEAU,SEJJ"
 
 # Service Maersk yang diambil jadwalnya
-TARGET_SERVICES = ["IN1", "JKF", "IA1", "IA8", "IA15", "I15", "IA4"]
+TARGET_SERVICES = ["IN1", "JKF", "IA1", "IA8", "IA15", "I15", "IA4", "TX4"]
 
 # Fallback mapping jika pencarian dinamis terkendala
 STATIC_VESSEL_CODES = {
@@ -44,6 +44,8 @@ STATIC_VESSEL_CODES = {
     "9650066": "EZ5",  # ERASMUS LEO
     "9273947": "GF2",  # NIKEN
     "9322504": "L1T",  # IRENES RAY
+    "9449857": "GI0",  # ERASMUS CHIEF
+    "9320001": "26E",  # OEL VARUN
 }
 
 
@@ -194,7 +196,7 @@ async def scrape_maersk():
     schedules = [s for s in (res.data or []) if is_target_service(s.get('service'))]
 
     if not schedules:
-        print("Tidak ada jadwal dengan service Maersk (IN1, JKF, IA1, IA8, IA15, I15, IA4) yang perlu diperbarui.")
+        print("Tidak ada jadwal dengan service Maersk (IN1, JKF, IA1, IA8, IA15, I15, IA4, TX4) yang perlu diperbarui.")
         return
 
     headers = {

@@ -707,7 +707,7 @@ async def main():
     print("=" * 60)
     await scrape_shipmentlink()
     
-    # 2c. Ambil Route & ETA Liner dari Maersk (IN1, JKF, IA1, IA8, IA15, IA4)
+    # 2c. Ambil Route & ETA Liner dari Maersk (IN1, JKF, IA1, IA8, IA15, IA4, TX4)
     print("\n" + "=" * 60)
     print("TAHAP 2c: Route & ETA Liner (Maersk)")
     print("=" * 60)
