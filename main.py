@@ -5,7 +5,7 @@ import re       # Tambahkan ini untuk Regex
 import json     # Tambahkan ini untuk parsing JSON djson
 import math # Untuk kalkulasi Haversine
 import random # Untuk jitter
-from datetime import datetime, timedelta # Tambahkan ini untuk format waktu
+from datetime import datetime, timedelta, timezone # Tambahkan ini untuk format waktu
 
 # Pastikan console Windows mendukung karakter Unicode (seperti tanda panah dari Crawl4AI)
 if sys.platform == 'win32':
@@ -143,6 +143,35 @@ def extract_coordinates(html_text: str, markdown_text: str):
             return lat, lon
 
     return None, None
+
+def extract_position_received(html_text: str, now_utc: datetime = None):
+    """
+    Ekstrak waktu posisi AIS terakhir diterima (VesselFinder "Position Received").
+    Posisi bisa berhari-hari lebih tua dari waktu scrape, jadi disimpan terpisah dari scraped_at.
+    1. Tooltip absolut di sel #lastrep: data-title="Oct 5, 2026 15:56 UTC"
+    2. Fallback: djson "lrpd" relatif ("4 days ago", "12 hours ago", "8 min ago")
+    Return ISO 8601 UTC string, atau None jika tidak ditemukan.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+
+    lastrep_match = re.search(r'id=["\']lastrep["\'].*?data-title=["\']([^"\']+?)\s*UTC["\']', html_text, re.IGNORECASE | re.DOTALL)
+    if lastrep_match:
+        try:
+            parsed = datetime.strptime(lastrep_match.group(1).strip(), "%b %d, %Y %H:%M")
+            return parsed.replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            pass
+
+    lrpd_match = re.search(r'["\']?lrpd["\']?\s*:\s*["\']([^"\']*)["\']', html_text.replace('&quot;', '"'))
+    if lrpd_match:
+        rel = re.search(r'(\d+)\s*(min|hour|day)', lrpd_match.group(1), re.IGNORECASE)
+        if rel:
+            unit = {'min': 'minutes', 'hour': 'hours', 'day': 'days'}[rel.group(2).lower()]
+            return (now_utc - timedelta(**{unit: int(rel.group(1))})).isoformat()
+        if 'just now' in lrpd_match.group(1).lower():
+            return now_utc.isoformat()
+
+    return None
 
 def clean_markdown_link(text: str) -> str:
     """
@@ -401,8 +430,11 @@ async def scrape_vessel_data():
                 # 6. Ekstrak Navigation Status dari teks halaman
                 nav_status_match = re.search(r'Navigation Status\s*\n\s*([^\n]+)', page_text, re.IGNORECASE)
                 scraped_nav_status = nav_status_match.group(1).strip() if nav_status_match else None
-                
-                print(f"Ekstraksi Berhasil -> Speed: {scraped_speed} kn | ETA: {scraped_eta} | Dest: {scraped_destination} | Last Port: {scraped_previous_port} | Nav: {scraped_nav_status}")
+
+                # 7. Ekstrak waktu posisi AIS diterima (bisa jauh lebih lama dari waktu scrape)
+                scraped_position_received_at = extract_position_received(html_text)
+
+                print(f"Ekstraksi Berhasil -> Speed: {scraped_speed} kn | ETA: {scraped_eta} | Dest: {scraped_destination} | Last Port: {scraped_previous_port} | Nav: {scraped_nav_status} | Position Received: {scraped_position_received_at}")
 
                 # Hitung Smart Predicted ETA untuk menghilangkan anomali division by zero/near-zero
                 smart_predicted_eta = calculate_smart_predicted_eta(
@@ -506,7 +538,10 @@ async def scrape_vessel_data():
                 if is_valid_location:
                     log_data["latitude"] = vessel_lat
                     log_data["longitude"] = vessel_lon
-                
+
+                if scraped_position_received_at:
+                    log_data["position_received_at"] = scraped_position_received_at
+
                 try:
                     supabase.table('tracking_logs').insert(log_data).execute()
                     print(f"Data log {vessel_name} tersimpan di Supabase.")
