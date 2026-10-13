@@ -493,7 +493,23 @@ async def scrape_vessel_data():
                             metadata={'previous_port': scraped_previous_port, 'destination': scraped_destination}
                         )
 
-                # 7. Insert ke Supabase tracking_logs
+                # 7. Hitung predicted_eta_ml untuk tracking_logs & ETA integrity analytics
+                predicted_eta_ml = None
+                now_utc = datetime.now(timezone.utc)
+                if is_valid_location and scraped_distance and scraped_distance > 0 and scraped_speed and scraped_speed > 1.0:
+                    try:
+                        transit_hours = float(scraped_distance) / float(scraped_speed)
+                        if 0 < transit_hours < 720:  # Batas wajar transit maks 30 hari
+                            pred_dt = now_utc + timedelta(hours=transit_hours)
+                            predicted_eta_ml = pred_dt.isoformat()
+                    except Exception as e:
+                        print(f"  ⚠ Error hitung transit ETA: {e}")
+
+                # Fallback ke AIS ETA jika kecepatan tidak memadai tapi AIS ETA tersedia
+                if not predicted_eta_ml and scraped_eta:
+                    predicted_eta_ml = scraped_eta
+
+                # Insert ke Supabase tracking_logs
                 log_data = {
                     "schedule_id": vessel_id,
                     "speed_sog": scraped_speed,
@@ -501,6 +517,9 @@ async def scrape_vessel_data():
                     "preview_eta_ais": scraped_eta,
                     "destination": scraped_destination
                 }
+
+                if predicted_eta_ml:
+                    log_data["predicted_eta_ml"] = predicted_eta_ml
                 
                 if is_valid_location:
                     log_data["latitude"] = vessel_lat
