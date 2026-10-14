@@ -586,95 +586,98 @@ async def scrape_vessel_data():
             else:
                 print(f"Gagal scrape {vessel_name}: Halaman terlalu kecil atau error ({len(html_text)} bytes)")
 
+# tracking_logs disimpan 90 hari: lintasan kapal untuk analisa dan historical_transit_hours
+# (ETA engine) butuh voyage-voyage sebelumnya. Setelah itu dihapus agar database tidak penuh.
+TRACKING_LOG_RETENTION_DAYS = 90
+# Hari yang sudah lewat sekian hari diringkas ke vessel_daily_summary (sekali per kapal per hari)
+SUMMARY_AFTER_DAYS = 3
+# Run yang terlewat tetap tertangani: hari-hari sebelumnya ikut dicek, yang sudah ada dilewati
+SUMMARY_LOOKBACK_DAYS = 7
+
+
+def fetch_all(build_query, page_size=1000):
+    """PostgREST membatasi 1000 baris per request: ambil bertahap."""
+    rows = []
+    offset = 0
+    while True:
+        data = build_query().range(offset, offset + page_size - 1).execute().data or []
+        rows.extend(data)
+        if len(data) < page_size:
+            return rows
+        offset += page_size
+
+
 async def archive_and_cleanup():
     print("\n[MAINTENANCE] Memulai proses archive dan cleanup tracking_logs...")
-    
-    # 1. Tentukan batas waktu (3 hari yang lalu)
-    three_days_ago = datetime.now() - timedelta(days=3)
-    three_days_ago_iso = three_days_ago.isoformat()
-    
-    # 2. Ambil data yang lebih tua dari 3 hari
-    try:
-        # Tambahkan inner/left join ke vessel_schedules untuk ambil 'service'
-        response = supabase.table('tracking_logs').select('*, vessel_schedules(service)').lt('scraped_at', three_days_ago_iso).execute()
-        logs = response.data
-    except Exception as e:
-        print(f"Gagal mengambil data lama: {e}")
-        return
+    today = datetime.now(timezone.utc).date()
 
-    if not logs:
-        print("[MAINTENANCE] Tidak ada data tracking yang perlu di-archive (lebih tua dari 3 hari).")
-        return
-
-    # 3. Kelompokkan berdasarkan schedule_id dan tanggal
-    # Key: (schedule_id, date_str) -> List of logs
-    daily_groups = {}
-    for log in logs:
-        # Asumsikan scraped_at formatnya ISO 8601 string misal "2026-04-06T14:30:00+00:00"
-        scraped_at_str = log.get('scraped_at', '2026-01-01T00:00:00')
-        date_str = scraped_at_str[:10]  # Ambil YYYY-MM-DD (10 karakter pertama)
-        
-        key = (log['schedule_id'], date_str)
-        if key not in daily_groups:
-            daily_groups[key] = []
-        daily_groups[key].append(log)
-        
-    # 4. Buat data summary (1 baris per hari)
+    # 1. Ringkas hari yang sudah selesai ke vessel_daily_summary (tanggal UTC, seperti sebelumnya)
     summary_data = []
-    log_ids_to_delete = []
-    
-    for (schedule_id, date_str), group_logs in daily_groups.items():
-        # Urutkan berdasarkan waktu (terlama ke terbaru) supaya bisa ambil data terakhir di hari tsb
-        group_logs.sort(key=lambda x: x.get('scraped_at', ''))
-        latest_log = group_logs[-1]
-        
-        # Hitung rata-rata dengan mengabaikan tipe data None
-        speeds = [float(l.get('speed_sog', 0) or 0) for l in group_logs]
-        distances = [float(l.get('distance_to_jkt', 0) or 0) for l in group_logs]
-        
-        avg_speed = sum(speeds) / len(speeds) if speeds else 0.0
-        avg_distance = sum(distances) / len(distances) if distances else 0.0
-        
-        # Ambil kolom service, default None jika tidak ada
-        vessel_sched = latest_log.get('vessel_schedules')
-        service = vessel_sched.get('service') if isinstance(vessel_sched, dict) else None
-        
-        summary_data.append({
-            "schedule_id": schedule_id,
-            "summary_date": date_str,
-            "service": service,
-            "avg_speed_sog": round(avg_speed, 2),
-            "avg_distance_to_jkt": round(avg_distance, 2),
-            "latest_eta_ais": latest_log.get('preview_eta_ais'),
-            "latest_destination": latest_log.get('destination')
-        })
-        
-        for l in group_logs:
-            if 'id' in l:
-                log_ids_to_delete.append(l['id'])
-            
-    # 5. Insert ke vessel_daily_summary
+    for age in range(SUMMARY_AFTER_DAYS, SUMMARY_AFTER_DAYS + SUMMARY_LOOKBACK_DAYS):
+        day = today - timedelta(days=age)
+        day_str = day.isoformat()
+        next_day_str = (day + timedelta(days=1)).isoformat()
+        try:
+            existing = fetch_all(lambda: supabase.table('vessel_daily_summary')
+                                 .select('schedule_id')
+                                 .eq('summary_date', day_str))
+            logs = fetch_all(lambda: supabase.table('tracking_logs')
+                             .select('id, schedule_id, scraped_at, speed_sog, distance_to_jkt, preview_eta_ais, destination, vessel_schedules(service)')
+                             .gte('scraped_at', day_str)
+                             .lt('scraped_at', next_day_str)
+                             .order('scraped_at')
+                             .order('id'))
+        except Exception as e:
+            print(f"[MAINTENANCE] Gagal mengambil data tanggal {day_str}: {e}")
+            continue
+
+        already_summarized = {r['schedule_id'] for r in existing}
+        daily_groups = {}
+        for log in logs:
+            if log['schedule_id'] not in already_summarized:
+                daily_groups.setdefault(log['schedule_id'], []).append(log)
+
+        for schedule_id, group_logs in daily_groups.items():
+            # Sudah urut dari terlama ke terbaru: ambil data terakhir di hari tsb
+            latest_log = group_logs[-1]
+
+            # Hitung rata-rata dengan mengabaikan tipe data None
+            speeds = [float(l.get('speed_sog', 0) or 0) for l in group_logs]
+            distances = [float(l.get('distance_to_jkt', 0) or 0) for l in group_logs]
+            avg_speed = sum(speeds) / len(speeds) if speeds else 0.0
+            avg_distance = sum(distances) / len(distances) if distances else 0.0
+
+            vessel_sched = latest_log.get('vessel_schedules')
+            service = vessel_sched.get('service') if isinstance(vessel_sched, dict) else None
+
+            summary_data.append({
+                "schedule_id": schedule_id,
+                "summary_date": day_str,
+                "service": service,
+                "avg_speed_sog": round(avg_speed, 2),
+                "avg_distance_to_jkt": round(avg_distance, 2),
+                "latest_eta_ais": latest_log.get('preview_eta_ais'),
+                "latest_destination": latest_log.get('destination')
+            })
+
     if summary_data:
         try:
-            # Batch insert otomatis
             supabase.table('vessel_daily_summary').insert(summary_data).execute()
             print(f"[MAINTENANCE] Berhasil insert {len(summary_data)} baris summary harian ke tabel vessel_daily_summary.")
         except Exception as e:
+            # Log detail belum dihapus, jadi run berikutnya mencoba lagi
             print(f"[MAINTENANCE] Gagal melakukan insert ke vessel_daily_summary: {e}")
-            return
-            
-    # 6. Hapus data detail di tracking_logs
-    if log_ids_to_delete:
-        try:
-            # Hapus bertahap per batch untuk menghindari limit di query string
-            batch_size = 100
-            for i in range(0, len(log_ids_to_delete), batch_size):
-                batch_ids = log_ids_to_delete[i:i+batch_size]
-                supabase.table('tracking_logs').delete().in_('id', batch_ids).execute()
-            print(f"[MAINTENANCE] Berhasil menghapus {len(log_ids_to_delete)} baris data log detail yang lama dari tracking_logs.")
-        except Exception as e:
-            print(f"[MAINTENANCE] Gagal menghapus data lama dari tracking_logs: {e}")
-    
+    else:
+        print("[MAINTENANCE] Tidak ada hari baru yang perlu diringkas.")
+
+    # 2. Hapus log detail yang lebih tua dari masa simpan (filter di server, tanpa batas 1000 baris)
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=TRACKING_LOG_RETENTION_DAYS)).isoformat()
+    try:
+        deleted = supabase.table('tracking_logs').delete().lt('scraped_at', cutoff_iso).execute()
+        print(f"[MAINTENANCE] Berhasil menghapus {len(deleted.data or [])} baris tracking_logs yang lebih tua dari {TRACKING_LOG_RETENTION_DAYS} hari.")
+    except Exception as e:
+        print(f"[MAINTENANCE] Gagal menghapus data lama dari tracking_logs: {e}")
+
     print("[MAINTENANCE] Proses archive dan cleanup selesai.\n")
 
 async def main():
