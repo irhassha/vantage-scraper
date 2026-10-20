@@ -187,25 +187,32 @@ STALE_SCHEDULE_DAYS = 3
 # Jarak maksimum dari Jakarta untuk mendeteksi ATA (anchorage Tanjung Priok + toleransi koordinat)
 ATA_MAX_DISTANCE_NM = 80
 
-def select_current_voyages(schedules: list, now_utc: datetime = None) -> list:
+def parse_time(raw):
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+
+
+def select_current_voyages(schedules: list, now_utc: datetime = None, latest_closed_created: dict = None) -> list:
     """
     Pilih jadwal yang perlu di-scrape:
     - Lewati jadwal lama yang tidak pernah ditutup (ETB/liner ETA lewat > STALE_SCHEDULE_DAYS hari).
+    - Lewati jadwal sisa: dibuat sebelum voyage kapal yang sama yang sudah selesai (ATB/Departed).
+      Contoh EVER OBEY 0477-054S (dibuat Juni, tak pernah ditutup) yang mengambil log AIS dan ATA
+      voyage asli 0496-058S. latest_closed_created: imo -> created_at voyage selesai terbaru.
     - Satu kapal hanya untuk voyage terdekatnya: data AIS hanya menggambarkan voyage yang sedang
       berjalan, jadi voyage berikutnya tidak boleh ikut menerima log dan notifikasi yang sama.
     """
     now_utc = now_utc or datetime.now(timezone.utc)
     cutoff = now_utc - timedelta(days=STALE_SCHEDULE_DAYS)
     far_future = datetime.max.replace(tzinfo=timezone.utc)
+    latest_closed_created = latest_closed_created or {}
 
     def reference_time(schedule):
-        raw = schedule.get('etb') or schedule.get('liner_eta')
-        if not raw:
-            return None
-        try:
-            return datetime.fromisoformat(raw.replace('Z', '+00:00'))
-        except ValueError:
-            return None
+        return parse_time(schedule.get('etb') or schedule.get('liner_eta'))
 
     current = {}
     for schedule in schedules:
@@ -213,7 +220,14 @@ def select_current_voyages(schedules: list, now_utc: datetime = None) -> list:
         if ref is not None and ref < cutoff:
             continue
         vessel = schedule.get('master_vessels') or {}
-        key = vessel.get('imo_number') or schedule['id']
+        imo = vessel.get('imo_number')
+        created = parse_time(schedule.get('created_at'))
+        closed_after = latest_closed_created.get(imo) if imo else None
+        if created is not None and closed_after is not None and created < closed_after:
+            print(f"  ⚠ Lewati voyage sisa {vessel.get('vessel_name')} {schedule.get('voyage')}: "
+                  f"dibuat sebelum voyage yang sudah selesai (tutup/hapus jadwal ini).")
+            continue
+        key = imo or schedule['id']
         best = current.get(key)
         if best is None or (ref or far_future) < (reference_time(best) or far_future):
             current[key] = schedule
@@ -258,13 +272,28 @@ async def scrape_vessel_data():
     # 1. Ambil data jadwal kapal yang belum sandar (actual_atb is null dan bukan status Departed/Berth)
     # Kita join dengan master_vessels untuk mendapatkan imo_number
     response = supabase.table('vessel_schedules') \
-        .select('id, voyage, speed_sog, previous_port, liner_eta, etb, ata, master_vessels(imo_number, vessel_name)') \
+        .select('id, voyage, speed_sog, previous_port, liner_eta, etb, ata, created_at, master_vessels(imo_number, vessel_name)') \
         .is_('actual_atb', 'null') \
         .neq('status', 'Departed') \
         .neq('status', 'Berth') \
         .execute()
-    
-    schedules = select_current_voyages(response.data or [])
+
+    # Voyage yang sudah selesai per kapal: jadwal terbuka yang lebih tua darinya adalah sisa
+    latest_closed_created = {}
+    try:
+        closed = fetch_all(lambda: supabase.table('vessel_schedules')
+                           .select('id, created_at, master_vessels(imo_number)')
+                           .or_('actual_atb.not.is.null,status.eq.Departed')
+                           .order('id'))
+        for row in closed:
+            imo = (row.get('master_vessels') or {}).get('imo_number')
+            created = parse_time(row.get('created_at'))
+            if imo and created and (imo not in latest_closed_created or created > latest_closed_created[imo]):
+                latest_closed_created[imo] = created
+    except Exception as e:
+        print(f"  ⚠ Gagal mengambil voyage yang sudah selesai (pengaman voyage sisa dilewati): {e}")
+
+    schedules = select_current_voyages(response.data or [], latest_closed_created=latest_closed_created)
     if not schedules:
         print("Tidak ada kapal yang sedang ditracking saat ini.")
         return
