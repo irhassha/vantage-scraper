@@ -1,10 +1,10 @@
 name: VANTAGE Vessel Scraper
 
 on:
-  schedule:
-    # Siang (07:20 - 15:20 WIB tiap 2 jam: 0,2,4,6,8 UTC) & Malam (19:20, 23:20, 03:20 WIB tiap 4 jam: 12,16,20 UTC)
-    - cron: '20 0,2,4,6,8,12,16,20 * * *'
-  workflow_dispatch: # Memungkinkan trigger manual dari tombol di GitHub
+  # Dijadwalkan oleh pg_cron Supabase (job 'vantage-scraper', 20 0,2,4,6,8,12,16,20 * * * UTC) lewat
+  # workflow_dispatch: cron GitHub sering melewatkan run. Lihat vantage-web
+  # supabase/migrations/20261020050000_pg_cron_dispatch.sql.
+  workflow_dispatch: # Juga untuk trigger manual dari tombol di GitHub
 
 jobs:
   scrape:
