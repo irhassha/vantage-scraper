@@ -186,6 +186,20 @@ STALE_SCHEDULE_DAYS = 3
 
 # Jarak maksimum dari Jakarta untuk mendeteksi ATA (anchorage Tanjung Priok + toleransi koordinat)
 ATA_MAX_DISTANCE_NM = 80
+# Area Jakarta: posisi VesselFinder dibulatkan ke derajat penuh, jadi kotak Jakarta terbaca ~8 NM
+# dan kotak di sebelahnya 50+ NM. Kapal yang masuk area ini dianggap tiba (sama dengan derived_ata
+# di Supabase yang dipakai evaluasi ETA integrity).
+ARRIVAL_AREA_NM = 20
+
+_JAKARTA_DEST = re.compile(r'(JKT|JKD|JAKARTA|PRIOK|ID ?TPP|ID ?DKT|ID ?JK|NPCT|KOJA|JICT)', re.IGNORECASE)
+
+
+def is_jakarta_destination(destination) -> bool:
+    """AIS destination bound for Jakarta. Format "ASAL>TUJUAN": hanya bagian setelah '>' yang dihitung
+    ("CNSHK>IDJKD" menuju Jakarta, "IDJKT>SGSIN" meninggalkan Jakarta)."""
+    if not destination:
+        return False
+    return bool(_JAKARTA_DEST.search(destination.split('>')[-1]))
 
 def parse_time(raw):
     if not raw:
@@ -445,10 +459,7 @@ async def scrape_vessel_data():
                 print(f"Ekstraksi Berhasil -> Speed: {scraped_speed} kn | ETA: {scraped_eta} | Dest: {scraped_destination} | Last Port: {scraped_previous_port} | Nav: {scraped_nav_status} | Position Received: {scraped_position_received_at}")
 
                 # --- ELEMEN EVALUASI NOTIFIKASI BERTH PLANNER ---
-                jakarta_keywords = ['jakarta', 'idjkt', 'tanjung priok', 'jkt', 'id jkt']
-                is_destination_jakarta = any(
-                    kw in scraped_destination.lower() for kw in jakarta_keywords
-                ) if scraped_destination else False
+                is_destination_jakarta = is_jakarta_destination(scraped_destination)
 
                 # 1. Notifikasi: Perubahan Speed Signifikan (selisih >= 3.0 knot)
                 if old_speed is not None and scraped_speed is not None:
@@ -580,23 +591,21 @@ async def scrape_vessel_data():
                     schedule_update['distance_to_jkt_nm'] = float(scraped_distance)
                 
                 # 11. Auto-Detect ATA (Actual Time of Arrival)
-                # Kondisi: destination adalah Jakarta/IDJKT DAN (speed < 1.0 kn ATAU nav status Moored/At Anchor)
-                jakarta_keywords = ['jakarta', 'idjkt', 'tanjung priok', 'jkt', 'id jkt']
-                is_destination_jakarta = any(
-                    kw in scraped_destination.lower() for kw in jakarta_keywords
-                ) if scraped_destination else False
-                
+                # Kondisi: destination Jakarta DAN (kapal masuk area Jakarta ATAU berhenti / anchor /
+                # moored dalam ATA_MAX_DISTANCE_NM). Tanpa syarat area, kapal yang masih bergerak pelan
+                # di anchorage baru mendapat ATA berjam-jam kemudian, atau tidak sama sekali sebelum sandar.
                 is_arrived = (
-                    scraped_speed < 1.0 or 
+                    scraped_speed < 1.0 or
                     (scraped_nav_status and scraped_nav_status.lower() in ['moored', 'at anchor', 'arrived'])
                 )
                 # Kapal yang berhenti jauh dari Jakarta (menunggu di port lain) belum tiba. Batas longgar
                 # karena koordinat VesselFinder dibulatkan ke derajat penuh (meleset hingga ~40 NM).
                 is_near_jakarta = is_valid_location and scraped_distance <= ATA_MAX_DISTANCE_NM
-                
+                in_arrival_area = is_valid_location and 0 < scraped_distance <= ARRIVAL_AREA_NM
+
                 # Hanya kedatangan pertama: tanpa cek ini ATA tertimpa setiap run selama kapal
                 # masih menunggu di anchorage, sampai bisa lebih lambat dari ATB.
-                if is_destination_jakarta and is_arrived and is_near_jakarta and not schedule.get('ata'):
+                if is_destination_jakarta and (in_arrival_area or (is_arrived and is_near_jakarta)) and not schedule.get('ata'):
                     ata_now = datetime.utcnow().isoformat()
                     schedule_update['ata'] = ata_now
                     schedule_update['status'] = 'Arrived'
@@ -614,6 +623,43 @@ async def scrape_vessel_data():
                 await asyncio.sleep(random.uniform(3, 7))
             else:
                 print(f"Gagal scrape {vessel_name}: Halaman terlalu kecil atau error ({len(html_text)} bytes)")
+
+# Kapal yang baru sandar dicek sejauh ini ke belakang untuk ATA yang belum tercatat
+ATA_BACKFILL_DAYS = 3
+
+
+async def backfill_missing_ata():
+    """
+    Kapal berhenti di-scrape begitu NPCT1 mencatat ATB, jadi kalau run scraper tidak sempat
+    menangkapnya di area Jakarta, ATA tidak pernah tercatat. Isi ATA kapal yang sandar dalam
+    ATA_BACKFILL_DAYS hari terakhir dari log AIS pertamanya di area Jakarta (derived_ata Supabase).
+    """
+    since = (datetime.now(timezone.utc) - timedelta(days=ATA_BACKFILL_DAYS)).isoformat()
+    try:
+        rows = supabase.table('vessel_schedules') \
+            .select('id, voyage, actual_atb, master_vessels(vessel_name)') \
+            .gte('actual_atb', since) \
+            .is_('ata', 'null') \
+            .is_('actual_ata', 'null') \
+            .execute().data or []
+    except Exception as e:
+        print(f"  ⚠ Gagal mengambil kapal yang sandar tanpa ATA: {e}")
+        return
+
+    filled = 0
+    for row in rows:
+        try:
+            ata = supabase.rpc('derived_ata', {'p_schedule_id': row['id'], 'p_before': row['actual_atb']}).execute().data
+        except Exception as e:
+            print(f"  ⚠ Gagal menghitung ATA {row.get('voyage')}: {e}")
+            continue
+        if not ata:
+            continue
+        supabase.table('vessel_schedules').update({'ata': ata}).eq('id', row['id']).execute()
+        filled += 1
+        print(f"  ⚓ ATA diisi dari log AIS: {(row.get('master_vessels') or {}).get('vessel_name')} {row.get('voyage')} → {ata}")
+    print(f"[ATA] {filled} dari {len(rows)} kapal yang sandar tanpa ATA berhasil diisi.")
+
 
 # tracking_logs disimpan 90 hari: lintasan kapal untuk analisa dan historical_transit_hours
 # (ETA engine) butuh voyage-voyage sebelumnya. Setelah itu dihapus agar database tidak penuh.
@@ -751,7 +797,13 @@ async def main():
     print("TAHAP 3: Tracking Posisi Kapal (VesselFinder)")
     print("=" * 60)
     await scrape_vessel_data()
-    
+
+    # 3b. ATA untuk kapal yang sudah sandar tanpa ATA (sebelum log lamanya diringkas)
+    print("\n" + "=" * 60)
+    print("TAHAP 3b: Lengkapi ATA Kapal yang Sudah Sandar")
+    print("=" * 60)
+    await backfill_missing_ata()
+
     # 4. Jalankan opsi cleanup & archiving database
     print("\n" + "=" * 60)
     print("TAHAP 4: Archive & Cleanup Database")
