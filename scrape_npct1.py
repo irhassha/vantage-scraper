@@ -87,6 +87,12 @@ async def scrape_npct1():
         ata_raw = cols[7].text.strip()
         etd_raw = cols[8].text.strip()
         atd_raw = cols[9].text.strip()
+        open_stacking_raw = cols[10].text.strip() if len(cols) > 10 else None
+        closing_doc_raw = cols[11].text.strip() if len(cols) > 11 else None
+        closing_phys_raw = cols[12].text.strip() if len(cols) > 12 else None
+        open_stacking_utc = parse_wib_to_utc(open_stacking_raw)
+        closing_doc_utc = parse_wib_to_utc(closing_doc_raw)
+        closing_phys_utc = parse_wib_to_utc(closing_phys_raw)
         
         # Handle SAILED status — auto-mark as Departed
         if status == 'SAILED':
@@ -196,10 +202,14 @@ async def scrape_npct1():
         schedule_data = {
             'vessel_id': vessel_id,
             'voyage': voyage,
+            'voyage_out': voy_out if voy_out else None,
             'service': service,
             'etb': etb_utc,
             'status': vessel_status,
-            'is_watchlist': False
+            'is_watchlist': False,
+            'open_stacking': open_stacking_utc,
+            'closing_document': closing_doc_utc,
+            'closing_physical': closing_phys_utc
         }
         
         if is_berthed:
