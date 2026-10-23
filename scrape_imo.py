@@ -48,7 +48,7 @@ async def scrape_imo_resolution(max_vessels: int = 2):
     
     success_count = 0
     
-    async with httpx.AsyncClient(headers=headers, verify=False, timeout=httpx.Timeout(30.0)) as client:
+    async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(30.0)) as client:
         for v in vessels:
             v_id = v['id']
             v_name = v['vessel_name']

@@ -161,7 +161,7 @@ async def scrape_shipmentlink():
     updated = 0
     cache = {}  # vessel_name -> hasil parse
 
-    async with httpx.AsyncClient(headers=headers, verify=False, timeout=httpx.Timeout(30.0)) as client:
+    async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(30.0)) as client:
         try:
             vessel_codes = await fetch_vessel_codes(client)
         except Exception as e:

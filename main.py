@@ -319,7 +319,7 @@ async def scrape_vessel_data():
         "Accept-Language": "en-US,en;q=0.5",
     }
 
-    async with httpx.AsyncClient(headers=headers, verify=False, timeout=httpx.Timeout(30.0)) as client:
+    async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(30.0)) as client:
         for schedule in schedules:
             vessel_id = schedule['id']
             voyage = schedule.get('voyage', 'N/A')
