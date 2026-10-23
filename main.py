@@ -191,7 +191,7 @@ ATA_MAX_DISTANCE_NM = 80
 # di Supabase yang dipakai evaluasi ETA integrity).
 ARRIVAL_AREA_NM = 20
 
-_JAKARTA_DEST = re.compile(r'(JKT|JKD|JAKARTA|PRIOK|ID ?TPP|ID ?DKT|ID ?JK|NPCT|KOJA|JICT)', re.IGNORECASE)
+_JAKARTA_DEST = re.compile(r'(JKT|JTK|JKD|JAKARTA|PRIOK|ID ?TPP|ID ?DKT|ID ?JK|ID ?JTK|NPCT|KOJA|JICT)', re.IGNORECASE)
 
 
 def is_jakarta_destination(destination) -> bool:

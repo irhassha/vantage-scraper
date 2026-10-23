@@ -55,12 +55,12 @@ def format_port_title(name: str) -> str:
 
 
 def is_jakarta_port(name: str, un_loc: str = "") -> bool:
-    if un_loc and un_loc.upper() == "IDJKT":
+    if un_loc and un_loc.upper() in ["IDJKT", "IDJTK", "JTK"]:
         return True
     if not name:
         return False
     n = name.upper()
-    return any(k in n for k in ["JAKARTA", "TANJUNG PRIOK", "PRIOK"])
+    return any(k in n for k in ["JAKARTA", "TANJUNG PRIOK", "PRIOK", "IDJKT", "IDJTK", "JKT", "JTK"])
 
 
 async def fetch_vessel_schedule(client: httpx.AsyncClient, vessel_name: str, year: int, month: int) -> list:

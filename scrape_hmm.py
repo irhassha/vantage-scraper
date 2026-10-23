@@ -59,12 +59,12 @@ def format_port_title(name: str) -> str:
 
 
 def is_jakarta_port(name: str, code: str = "") -> bool:
-    if code and code.upper() == "IDJKT":
+    if code and code.upper() in ["IDJKT", "IDJTK", "JTK"]:
         return True
     if not name:
         return False
     n = name.upper()
-    return any(k in n for k in ["JAKARTA", "TANJUNG PRIOK", "PRIOK", "IDJKT"])
+    return any(k in n for k in ["JAKARTA", "TANJUNG PRIOK", "PRIOK", "IDJKT", "IDJTK", "JKT", "JTK"])
 
 
 async def scrape_hmm():
