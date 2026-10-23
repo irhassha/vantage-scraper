@@ -63,14 +63,28 @@ async def scrape_imo_resolution(max_vessels: int = 2):
                 response = await client.get(search_url)
                 response.raise_for_status()
                     
-                # Ekstrak IMO dari HTML content menggunakan Regex
-                # Link di VesselFinder memiliki format /vessels/details/1234567
-                # Kita cari angka 7 digit pertama setelah /vessels/details/
-                match = re.search(r'/vessels/details/(\d{7})', response.text)
+                # Ekstrak pasangan IMO dan nama kapal dari tabel pencarian VesselFinder
+                # Format: href="/vessels/details/1234567"...<div class="slna">VESSEL NAME</div>
+                pattern = r'href=[\"\']/vessels/details/(\d{7})[\"\'][^>]*>[\s\S]*?<div class=[\"\']slna[\"\']>([^<]+)</div>'
+                results = re.findall(pattern, response.text)
                 
-                if match:
-                    found_imo = match.group(1)
-                    print(f"  + Berhasil menemukan IMO: {found_imo}")
+                found_imo = None
+                clean_target = re.sub(r'[^a-zA-Z0-9]', '', v_name).lower()
+                
+                # Cari match yang paling sesuai dengan nama kapal
+                for imo_cand, name_cand in results:
+                    clean_cand = re.sub(r'[^a-zA-Z0-9]', '', name_cand).lower()
+                    if clean_target == clean_cand or clean_target in clean_cand or clean_cand in clean_target:
+                        found_imo = imo_cand
+                        print(f"  + Cocok dengan '{name_cand}': IMO {found_imo}")
+                        break
+                
+                # Jika tidak ada exact/partial match tapi ada hasil pencarian, gunakan baris pertama hasil
+                if not found_imo and results:
+                    found_imo = results[0][0]
+                    print(f"  + Fallback baris pertama '{results[0][1]}': IMO {found_imo}")
+                
+                if found_imo:
                     
                     # Update Supabase
                     update_res = supabase.table('master_vessels').update({'imo_number': found_imo}).eq('id', v_id).execute()
