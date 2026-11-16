@@ -191,6 +191,14 @@ ATA_MAX_DISTANCE_NM = 80
 # di Supabase yang dipakai evaluasi ETA integrity).
 ARRIVAL_AREA_NM = 20
 
+# Kapal yang pernah tercatat lebih jauh dari ini sudah benar-benar meninggalkan Jakarta. Di atas
+# band anchorage (65.72 NM): menunggu di anchorage masih bagian dari kedatangan. Sama dengan
+# last_left_port() di vantage-web (supabase/migrations/20261113010000_ata_ignore_previous_call.sql).
+LEFT_PORT_NM = 100
+# Pengaman voyage sebelumnya hanya berlaku sekitar satu rotasi setelah ATB-nya: jauh setelah itu
+# (atau kalau log lama sudah dihapus) ATA dicatat seperti biasa.
+PREVIOUS_CALL_WINDOW_DAYS = 21
+
 _JAKARTA_DEST = re.compile(r'(JKT|JTK|JKD|JAKARTA|PRIOK|ID ?TPP|ID ?DKT|ID ?JK|ID ?JTK|NPCT|KOJA|JICT)', re.IGNORECASE)
 
 
@@ -208,6 +216,33 @@ def parse_time(raw):
         return datetime.fromisoformat(raw.replace('Z', '+00:00'))
     except ValueError:
         return None
+
+
+def still_on_previous_call(previous_atb, left_port_at, now_utc: datetime = None) -> bool:
+    """
+    True kalau kapal masih di panggilan Jakarta voyage sebelumnya, jadi posisinya di dermaga atau
+    anchorage bukan kedatangan voyage ini.
+
+    Begitu voyage sebelumnya mendapat ATB, voyage berikutnya langsung menjadi voyage aktif, padahal
+    kapal masih sandar. Pada rotasi pendek (IN1 SPIL NISAKA / IRENES RAY, JKF AS PENELOPE) ATA
+    voyage berikutnya dulu langsung tercatat ~10 hari terlalu awal (SPIL NISAKA 644E: ATA 25 Okt,
+    tiba sebenarnya 5 Nov).
+
+    previous_atb: ATB terbaru voyage kapal yang sama yang sudah selesai.
+    left_port_at: log AIS terakhir voyage ini yang lebih jauh dari LEFT_PORT_NM setelah previous_atb.
+    """
+    if previous_atb is None:
+        return False
+    now_utc = now_utc or datetime.now(timezone.utc)
+    if now_utc - previous_atb > timedelta(days=PREVIOUS_CALL_WINDOW_DAYS):
+        return False
+    return left_port_at is None or left_port_at <= previous_atb
+
+
+def left_port_since(schedule_id: str, since: datetime):
+    """Log AIS terakhir voyage ini yang lebih jauh dari LEFT_PORT_NM setelah `since`, atau None."""
+    res = supabase.table('tracking_logs')         .select('scraped_at')         .eq('schedule_id', schedule_id)         .gt('distance_to_jkt', LEFT_PORT_NM)         .gt('scraped_at', since.isoformat())         .order('scraped_at', desc=True)         .limit(1)         .execute()
+    return parse_time(res.data[0]['scraped_at']) if res.data else None
 
 
 def select_current_voyages(schedules: list, now_utc: datetime = None, latest_closed_created: dict = None) -> list:
@@ -294,9 +329,11 @@ async def scrape_vessel_data():
 
     # Voyage yang sudah selesai per kapal: jadwal terbuka yang lebih tua darinya adalah sisa
     latest_closed_created = {}
+    # ATB terbaru per kapal: selama kapal belum pergi sejak itu, voyage berikutnya belum tiba
+    latest_closed_atb = {}
     try:
         closed = fetch_all(lambda: supabase.table('vessel_schedules')
-                           .select('id, created_at, master_vessels(imo_number)')
+                           .select('id, created_at, actual_atb, master_vessels(imo_number)')
                            .or_('actual_atb.not.is.null,status.eq.Departed')
                            .order('id'))
         for row in closed:
@@ -304,6 +341,9 @@ async def scrape_vessel_data():
             created = parse_time(row.get('created_at'))
             if imo and created and (imo not in latest_closed_created or created > latest_closed_created[imo]):
                 latest_closed_created[imo] = created
+            atb = parse_time(row.get('actual_atb'))
+            if imo and atb and (imo not in latest_closed_atb or atb > latest_closed_atb[imo]):
+                latest_closed_atb[imo] = atb
     except Exception as e:
         print(f"  ⚠ Gagal mengambil voyage yang sudah selesai (pengaman voyage sisa dilewati): {e}")
 
@@ -605,7 +645,17 @@ async def scrape_vessel_data():
 
                 # Hanya kedatangan pertama: tanpa cek ini ATA tertimpa setiap run selama kapal
                 # masih menunggu di anchorage, sampai bisa lebih lambat dari ATB.
-                if is_destination_jakarta and (in_arrival_area or (is_arrived and is_near_jakarta)) and not schedule.get('ata'):
+                arrival_detected = is_destination_jakarta and (in_arrival_area or (is_arrived and is_near_jakarta)) and not schedule.get('ata')
+                previous_atb = latest_closed_atb.get(imo)
+                if arrival_detected and previous_atb:
+                    try:
+                        if still_on_previous_call(previous_atb, left_port_since(vessel_id, previous_atb)):
+                            arrival_detected = False
+                            print(f"  ⏸ {vessel_name} {voyage}: masih di panggilan voyage sebelumnya "
+                                  f"(ATB {previous_atb.isoformat()}), belum pernah > {LEFT_PORT_NM} NM. ATA belum dicatat.")
+                    except Exception as e:
+                        print(f"  ⚠ Gagal cek panggilan voyage sebelumnya: {e}")
+                if arrival_detected:
                     ata_now = datetime.utcnow().isoformat()
                     schedule_update['ata'] = ata_now
                     schedule_update['status'] = 'Arrived'
