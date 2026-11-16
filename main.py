@@ -22,6 +22,7 @@ from scrape_maersk import scrape_maersk
 from scrape_sitc import scrape_sitc
 from scrape_hmm import scrape_hmm
 from scrape_msc import scrape_msc
+from scrape_tslines import scrape_tslines
 
 # Load Environment Variables
 load_dotenv()
@@ -848,6 +849,12 @@ async def main():
     print("TAHAP 2f: Route & ETA Liner (MSC)")
     print("=" * 60)
     await scrape_msc()
+
+    # 2g. Ambil Route & ETA Liner dari TS Lines (KCI)
+    print("\n" + "=" * 60)
+    print("TAHAP 2g: Route & ETA Liner (TS Lines)")
+    print("=" * 60)
+    await scrape_tslines()
     
     # 3. Jalankan tracking posisi kapal via VesselFinder + Evaluasi Notifikasi
     print("\n" + "=" * 60)
